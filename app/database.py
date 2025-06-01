@@ -137,6 +137,27 @@ def migrate_database():
                 conn.commit()
                 migrations_applied.append("Added is_verified column to users table")
 
+            # Check if verification_codes table exists and add missing columns
+            if "sqlite" in settings.DATABASE_URL:
+                result = conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table' AND name='verification_codes'"))
+                vc_table_exists = result.fetchone() is not None
+            else:
+                result = conn.execute(
+                    text("SELECT table_name FROM information_schema.tables WHERE table_name = 'verification_codes'"))
+                vc_table_exists = result.fetchone() is not None
+
+            if vc_table_exists:
+                # Add used column to verification_codes table if it doesn't exist
+                if not check_column_exists("verification_codes", "used"):
+                    logger.info("Adding used column to verification_codes table...")
+                    if "sqlite" in settings.DATABASE_URL:
+                        conn.execute(text("ALTER TABLE verification_codes ADD COLUMN used BOOLEAN DEFAULT 0"))
+                    else:
+                        conn.execute(text("ALTER TABLE verification_codes ADD COLUMN used BOOLEAN DEFAULT FALSE"))
+                    conn.commit()
+                    migrations_applied.append("Added used column to verification_codes table")
+
             # You can add more migration checks here for future schema changes
             # Example:
             # if not check_column_exists("users", "new_column"):
