@@ -11,6 +11,7 @@ from app.models import (
 )
 from app.services.password_service import hash_password, verify_password, generate_verification_code
 from app.services.email_service import send_verification_email, send_password_reset_email
+from app.services.auth_service import create_user_token, get_current_user
 
 # Create router
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -81,7 +82,7 @@ async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login")
 def login_user(login_data: UserLogin, db: Session = Depends(get_db)):
-    """Authenticate user and receive access token (requires verified email)"""
+    """Authenticate user and receive JWT access token (requires verified email)"""
     # Find user by email
     user = db.query(User).filter(User.email == login_data.email).first()
 
@@ -98,12 +99,27 @@ def login_user(login_data: UserLogin, db: Session = Depends(get_db)):
             detail="Please verify your email before logging in. Check your inbox or use /resend-code endpoint."
         )
 
+    # Create JWT token
+    token_response = create_user_token(user)
+
     return {
         "message": "Login successful",
-        "user_id": user.id,
-        "user_name": user.fullname,
-        "email": user.email,
-        "access_token": "temporary_token_123"  # We'll add real JWT tokens later
+        **token_response
+    }
+
+
+@router.get("/me", response_model=UserResponse)
+def get_current_user_info(current_user: User = Depends(get_current_user)):
+    """Get current authenticated user information"""
+    return current_user
+
+
+@router.post("/logout")
+def logout_user(current_user: User = Depends(get_current_user)):
+    """Logout user (client should delete the token)"""
+    return {
+        "message": "Logout successful. Please delete the token from client storage.",
+        "user_id": current_user.id
     }
 
 
