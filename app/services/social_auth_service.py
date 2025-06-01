@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import User, SocialAccount
 from app.services.auth_service import create_user_token
-from app.models.social_auth import SocialUserInfo
+from app.models import SocialUserInfo  # Changed import
 
 # Initialize OAuth
 oauth = OAuth()
