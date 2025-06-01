@@ -1,29 +1,76 @@
-# app/database.py
-import os
-import sqlalchemy
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
+from app.config import settings
 
-# Get database URL from environment variable or use SQLite as fallback
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./debt_tracker.db")
+# Database setup
+engine = create_engine(
+    settings.DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+)
 
-# Create engine - works for both PostgreSQL and SQLite
-if DATABASE_URL.startswith("postgresql"):
-    engine = create_engine(DATABASE_URL)
-else:
-    # SQLite fallback for local development
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-
-# Create session for database operations
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base class for all models
 Base = declarative_base()
 
 
-# Function to get database session
+# Database models
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    password = Column(String)
+    fullname = Column(String)
+    is_verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    contacts = relationship("Contact", back_populates="user", cascade="all, delete-orphan")
+
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    phone = Column(String)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    user = relationship("User", back_populates="contacts")
+    debts = relationship("Debt", back_populates="contact", cascade="all, delete-orphan")
+
+
+class Debt(Base):
+    __tablename__ = "debts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Float)
+    description = Column(String)
+    is_paid = Column(Boolean, default=False)
+    is_my_debt = Column(Boolean)  # True = I owe them, False = they owe me
+    contact_id = Column(Integer, ForeignKey("contacts.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    contact = relationship("Contact", back_populates="debts")
+
+
+class VerificationCode(Base):
+    __tablename__ = "verification_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, index=True)
+    code = Column(String)
+    code_type = Column(String)  # "email" or "password_reset"
+    expires_at = Column(DateTime)
+    used = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Database functions
 def get_db():
     db = SessionLocal()
     try:
@@ -32,95 +79,5 @@ def get_db():
         db.close()
 
 
-# Function to create all tables
 def create_tables():
     Base.metadata.create_all(bind=engine)
-
-
-# Database Models (Tables) - Same as before
-
-# Users table
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    password = Column(String, nullable=True)  # Nullable for social auth users
-    fullname = Column(String)
-    is_email_verified = Column(Boolean, default=False)
-    avatar_url = Column(String, nullable=True)  # Profile picture URL
-    auth_provider = Column(String, default="email")  # "email", "google", "github"
-    provider_id = Column(String, nullable=True)  # Social provider user ID
-    created_at = Column(DateTime, default=datetime.now)
-
-    # Relationship: one user has many contacts
-    contacts = relationship("Contact", back_populates="owner")
-    social_accounts = relationship("SocialAccount", back_populates="user")
-
-
-# Social accounts table for linking multiple providers
-class SocialAccount(Base):
-    __tablename__ = "social_accounts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    provider = Column(String, nullable=False)  # "google", "github", etc.
-    provider_id = Column(String, nullable=False)  # Provider's user ID
-    provider_email = Column(String, nullable=True)  # Email from provider
-    access_token = Column(String, nullable=True)  # For API calls (encrypted)
-    refresh_token = Column(String, nullable=True)  # For token refresh
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-    # Relationships
-    user = relationship("User", back_populates="social_accounts")
-
-    # Unique constraint for provider + provider_id
-    __table_args__ = (
-        sqlalchemy.UniqueConstraint('provider', 'provider_id', name='_provider_user_uc'),
-    )
-
-
-# Contacts table
-class Contact(Base):
-    __tablename__ = "contacts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    fullname = Column(String)
-    phone_number = Column(String)
-    user_id = Column(Integer, ForeignKey("users.id"))  # Which user owns this contact
-    created_at = Column(DateTime, default=datetime.now)
-
-    # Relationships
-    owner = relationship("User", back_populates="contacts")
-    debts = relationship("Debt", back_populates="contact")
-
-
-# Debts table
-class Debt(Base):
-    __tablename__ = "debts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    debt_amount = Column(Float)
-    description = Column(String)
-    due_date = Column(DateTime)
-    is_paid = Column(Boolean, default=False)
-    is_my_debt = Column(Boolean)  # True = I owe them, False = they owe me
-    contact_id = Column(Integer, ForeignKey("contacts.id"))
-    created_at = Column(DateTime, default=datetime.now)
-
-    # Relationship
-    contact = relationship("Contact", back_populates="debts")
-
-
-# Verification codes table
-class VerificationCode(Base):
-    __tablename__ = "verification_codes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, index=True)
-    code = Column(String)
-    code_type = Column(String)  # "email_verification" or "password_reset"
-    created_at = Column(DateTime, default=datetime.now)
-    expires_at = Column(DateTime)
-    is_used = Column(Boolean, default=False)

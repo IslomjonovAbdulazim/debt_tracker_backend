@@ -1,441 +1,239 @@
-# app/routers/auth.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 from datetime import datetime, timedelta
+from pydantic import BaseModel, EmailStr
 
 from app.database import get_db, User, VerificationCode
-from app.models import (
-    UserCreate, UserResponse, UserLogin, ForgotPassword,
-    VerifyEmail, VerifyPasswordReset, ResetPassword, ResendCode
+from app.auth import (
+    hash_password, verify_password, generate_code, create_access_token,
+    send_verification_email, send_password_reset_email, get_current_user
 )
-from app.services.password_service import hash_password, verify_password, generate_verification_code
-from app.services.email_service import send_verification_email, send_password_reset_email
-from app.services.auth_service import create_user_token, get_current_user
+from app.responses import success_response, error_response
 
-# Create router
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+router = APIRouter()
 
 
-@router.post("/register", response_model=UserResponse)
-async def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
-    """Register a new user account and send verification email"""
-    # Check if user already exists
-    existing_user = db.query(User).filter(User.email == user_data.email).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
-        )
+# Pydantic models
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    fullname: str
 
-    # Hash the password
-    hashed_password = hash_password(user_data.password)
 
-    # Create new user (unverified by default)
-    new_user = User(
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class VerifyCode(BaseModel):
+    email: EmailStr
+    code: str
+
+
+class ForgotPassword(BaseModel):
+    email: EmailStr
+
+
+class ResetPassword(BaseModel):
+    email: EmailStr
+    code: str
+    new_password: str
+
+
+@router.post("/register")
+async def register(user_data: UserRegister, db: Session = Depends(get_db)):
+    """Register new user"""
+    # Check if user exists
+    if db.query(User).filter(User.email == user_data.email).first():
+        error_response("Email already registered", status_code=status.HTTP_400_BAD_REQUEST)
+
+    # Create user
+    user = User(
         email=user_data.email,
-        password=hashed_password,
-        fullname=user_data.fullname,
-        is_email_verified=False  # Account starts as unverified
+        password=hash_password(user_data.password),
+        fullname=user_data.fullname
     )
-
-    db.add(new_user)
+    db.add(user)
     db.commit()
-    db.refresh(new_user)
 
     # Generate verification code
-    verification_code_str = generate_verification_code()
-
-    # Store verification code in database
-    verification_code = VerificationCode(
+    code = generate_code()
+    verification = VerificationCode(
         email=user_data.email,
-        code=verification_code_str,
-        code_type="email_verification",
-        expires_at=datetime.now() + timedelta(minutes=10)
+        code=code,
+        code_type="email",
+        expires_at=datetime.utcnow() + timedelta(minutes=10)
     )
-
-    db.add(verification_code)
-    db.commit()
-
-    # Send verification email
-    try:
-        email_result = await send_verification_email(user_data.email, user_data.fullname, verification_code_str)
-
-        return {
-            "id": new_user.id,
-            "email": new_user.email,
-            "fullname": new_user.fullname,
-            "created_at": new_user.created_at,
-            "message": "Account created! Please check your email to verify your account.",
-            "email_sent": email_result["status"] == "success"
-        }
-    except Exception as e:
-        return {
-            "id": new_user.id,
-            "email": new_user.email,
-            "fullname": new_user.fullname,
-            "created_at": new_user.created_at,
-            "message": "Account created, but verification email failed to send. Use /resend-code endpoint.",
-            "email_sent": False
-        }
-
-
-@router.post("/login")
-def login_user(login_data: UserLogin, db: Session = Depends(get_db)):
-    """Authenticate user and receive JWT access token (requires verified email)"""
-    # Find user by email
-    user = db.query(User).filter(User.email == login_data.email).first()
-
-    if not user or not verify_password(login_data.password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
-        )
-
-    # Check if email is verified
-    if not user.is_email_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Please verify your email before logging in. Check your inbox or use /resend-code endpoint."
-        )
-
-    # Create JWT token
-    token_response = create_user_token(user)
-
-    return {
-        "message": "Login successful",
-        **token_response
-    }
-
-
-@router.get("/me", response_model=UserResponse)
-def get_current_user_info(current_user: User = Depends(get_current_user)):
-    """Get current authenticated user information"""
-    return current_user
-
-
-@router.post("/logout")
-def logout_user(current_user: User = Depends(get_current_user)):
-    """Logout user (client should delete the token)"""
-    return {
-        "message": "Logout successful. Please delete the token from client storage.",
-        "user_id": current_user.id
-    }
-
-
-@router.post("/forgot-password")
-async def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
-    """
-    STEP 1: Request password reset code
-    - Check if email exists in database
-    - Send reset code to user's email
-    - User will verify code in /verify-password-reset endpoint
-    """
-    # Check if user exists
-    user = db.query(User).filter(User.email == forgot_data.email).first()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No account found with this email address. Please check your email or register a new account."
-        )
-
-    # Generate reset code
-    reset_code = generate_verification_code()
-
-    # Store code in database with expiration (15 minutes)
-    verification_code = VerificationCode(
-        email=forgot_data.email,
-        code=reset_code,
-        code_type="password_reset",
-        expires_at=datetime.now() + timedelta(minutes=15)
-    )
-
-    db.add(verification_code)
+    db.add(verification)
     db.commit()
 
     # Send email
     try:
-        email_result = await send_password_reset_email(forgot_data.email, user.fullname, reset_code)
+        await send_verification_email(user_data.email, user_data.fullname, code)
+        email_sent = True
+    except:
+        email_sent = False
 
-        if email_result["status"] == "error":
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to send email. Please try again later or contact support."
-            )
-
-        return {
-            "message": f"Password reset code has been sent to {forgot_data.email}. Please check your inbox.",
-            "status": "success",
-            "email": forgot_data.email,
-            "expires_in_minutes": 15,
-            "next_step": "Use the 6-digit code in /verify-password-reset endpoint"
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send reset email. Please try again later."
-        )
+    return success_response(
+        "User registered successfully",
+        {
+            "user_id": user.id,
+            "email": user.email,
+            "email_sent": email_sent,
+            "message": "Please check your email for verification code"
+        },
+        status_code=201
+    )
 
 
-@router.post("/verify-password-reset")
-def verify_password_reset(verify_data: VerifyPasswordReset, db: Session = Depends(get_db)):
-    """
-    STEP 2: Verify password reset code (security check)
-    - Confirms user owns the email before allowing password change
-    - Use the 6-digit code from /forgot-password email
-    - After verification, user can proceed to /reset-password
-    """
-
-    # Find the reset code
-    verification_code = db.query(VerificationCode).filter(
+@router.post("/verify-email")
+def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
+    """Verify email with code"""
+    # Find valid code
+    code_record = db.query(VerificationCode).filter(
         VerificationCode.email == verify_data.email,
-        VerificationCode.code == verify_data.reset_code,
-        VerificationCode.code_type == "password_reset",
-        VerificationCode.is_used == False,
-        VerificationCode.expires_at > datetime.now()
+        VerificationCode.code == verify_data.code,
+        VerificationCode.code_type == "email",
+        VerificationCode.used == False,
+        VerificationCode.expires_at > datetime.utcnow()
     ).first()
 
-    if not verification_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset code. Please request a new code using /forgot-password"
-        )
+    if not code_record:
+        error_response("Invalid or expired verification code", status_code=status.HTTP_400_BAD_REQUEST)
 
-    # Check if user exists
+    # Find user and verify
     user = db.query(User).filter(User.email == verify_data.email).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+        error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
 
-    # DON'T mark code as used yet - they still need to actually reset password
-    # Just confirm the code is valid
+    user.is_verified = True
+    code_record.used = True
+    db.commit()
 
-    return {
-        "message": "Reset code verified successfully! You can now change your password.",
-        "status": "verified",
-        "email": verify_data.email,
-        "next_step": "Use /reset-password endpoint with the same code and your new password"
-    }
+    return success_response("Email verified successfully")
+
+
+@router.post("/login")
+def login(login_data: UserLogin, db: Session = Depends(get_db)):
+    """Login user"""
+    # Find user
+    user = db.query(User).filter(User.email == login_data.email).first()
+
+    if not user or not verify_password(login_data.password, user.password):
+        error_response("Invalid email or password", status_code=status.HTTP_401_UNAUTHORIZED)
+
+    if not user.is_verified:
+        error_response("Please verify your email first", status_code=status.HTTP_403_FORBIDDEN)
+
+    # Create token
+    token = create_access_token({"sub": str(user.id)})
+
+    return success_response(
+        "Login successful",
+        {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "fullname": user.fullname
+            }
+        }
+    )
+
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    """Get current user info"""
+    return success_response(
+        "User info retrieved",
+        {
+            "id": current_user.id,
+            "email": current_user.email,
+            "fullname": current_user.fullname,
+            "is_verified": current_user.is_verified,
+            "created_at": current_user.created_at.isoformat()
+        }
+    )
+
+
+@router.post("/forgot-password")
+async def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
+    """Request password reset"""
+    user = db.query(User).filter(User.email == forgot_data.email).first()
+    if not user:
+        error_response("Email not found", status_code=status.HTTP_404_NOT_FOUND)
+
+    # Generate reset code
+    code = generate_code()
+    verification = VerificationCode(
+        email=forgot_data.email,
+        code=code,
+        code_type="password_reset",
+        expires_at=datetime.utcnow() + timedelta(minutes=15)
+    )
+    db.add(verification)
+    db.commit()
+
+    # Send email
+    try:
+        await send_password_reset_email(forgot_data.email, user.fullname, code)
+        return success_response("Password reset code sent to your email")
+    except:
+        error_response("Failed to send email", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @router.post("/reset-password")
 def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
-    """
-    STEP 3: Actually reset the password
-    - Use the same code from /verify-password-reset
-    - Set your new password
-    - Must verify code first using /verify-password-reset
-    """
-
-    # Find the reset code (must be the same one that was verified)
-    verification_code = db.query(VerificationCode).filter(
+    """Reset password with code"""
+    # Find valid code
+    code_record = db.query(VerificationCode).filter(
         VerificationCode.email == reset_data.email,
-        VerificationCode.code == reset_data.reset_code,
+        VerificationCode.code == reset_data.code,
         VerificationCode.code_type == "password_reset",
-        VerificationCode.is_used == False,
-        VerificationCode.expires_at > datetime.now()
+        VerificationCode.used == False,
+        VerificationCode.expires_at > datetime.utcnow()
     ).first()
 
-    if not verification_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired reset code. Please verify your code first using /verify-password-reset"
-        )
+    if not code_record:
+        error_response("Invalid or expired reset code", status_code=status.HTTP_400_BAD_REQUEST)
 
-    # Find user
+    # Find user and update password
     user = db.query(User).filter(User.email == reset_data.email).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+        error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
 
-    # Validate new password
-    if len(reset_data.new_password) < 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 6 characters long"
-        )
-
-    # Don't allow same password (basic check)
-    if verify_password(reset_data.new_password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be different from your current password"
-        )
-
-    # Update password
     user.password = hash_password(reset_data.new_password)
-
-    # NOW mark code as used
-    verification_code.is_used = True
-
-    # Invalidate all other unused password reset codes for this email
-    other_codes = db.query(VerificationCode).filter(
-        VerificationCode.email == reset_data.email,
-        VerificationCode.code_type == "password_reset",
-        VerificationCode.is_used == False,
-        VerificationCode.id != verification_code.id
-    ).all()
-
-    for code in other_codes:
-        code.is_used = True
-
+    code_record.used = True
     db.commit()
 
-    return {
-        "message": "Password reset successfully! You can now login with your new password.",
-        "status": "success",
-        "user_id": user.id,
-        "email": user.email
-    }
-
-
-@router.post("/verify-email")
-async def verify_email(verify_data: VerifyEmail, db: Session = Depends(get_db)):
-    """
-    ONLY FOR EMAIL VERIFICATION (after registration)
-    - Use the 6-digit code from registration email
-    - Activates your account so you can login
-    - NOT used for password resets!
-    """
-    # Check if user exists
-    user = db.query(User).filter(User.email == verify_data.email).first()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    # Check if already verified
-    if user.is_email_verified:
-        return {
-            "message": "Email already verified",
-            "user_id": user.id,
-            "email": user.email,
-            "status": "already_verified"
-        }
-
-    # Find valid verification code
-    verification_code = db.query(VerificationCode).filter(
-        VerificationCode.email == verify_data.email,
-        VerificationCode.code == verify_data.code,
-        VerificationCode.code_type == "email_verification",
-        VerificationCode.is_used == False,
-        VerificationCode.expires_at > datetime.now()
-    ).first()
-
-    if not verification_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired verification code"
-        )
-
-    # Activate the account
-    user.is_email_verified = True
-    verification_code.is_used = True
-
-    db.commit()
-
-    return {
-        "message": "Email verified successfully! You can now log in.",
-        "user_id": user.id,
-        "email": user.email,
-        "status": "verified"
-    }
+    return success_response("Password reset successfully")
 
 
 @router.post("/resend-code")
-async def resend_code(resend_data: ResendCode, db: Session = Depends(get_db)):
-    """Resend verification code (email verification or password reset)"""
-
-    # Validate code_type
-    if resend_data.code_type not in ["email_verification", "password_reset"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid code type. Must be 'email_verification' or 'password_reset'"
-        )
-
-    # Check if user exists
-    user = db.query(User).filter(User.email == resend_data.email).first()
+async def resend_code(email_data: ForgotPassword, db: Session = Depends(get_db)):
+    """Resend verification code"""
+    user = db.query(User).filter(User.email == email_data.email).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No account found with this email address. Please check your email or register a new account."
-        )
-
-    # Check if user has too many recent attempts (rate limiting)
-    recent_codes = db.query(VerificationCode).filter(
-        VerificationCode.email == resend_data.email,
-        VerificationCode.code_type == resend_data.code_type,
-        VerificationCode.created_at > datetime.now() - timedelta(minutes=5)
-    ).count()
-
-    if recent_codes >= 3:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please wait 5 minutes before requesting another code."
-        )
-
-    # Invalidate old unused codes of the same type
-    old_codes = db.query(VerificationCode).filter(
-        VerificationCode.email == resend_data.email,
-        VerificationCode.code_type == resend_data.code_type,
-        VerificationCode.is_used == False
-    ).all()
-
-    for old_code in old_codes:
-        old_code.is_used = True
+        error_response("Email not found", status_code=status.HTTP_404_NOT_FOUND)
 
     # Generate new code
-    new_code = generate_verification_code()
-
-    # Set expiration time based on code type
-    if resend_data.code_type == "password_reset":
-        expires_in_minutes = 15
-    else:  # email_verification
-        expires_in_minutes = 10
-
-    # Store new code in database
-    verification_code = VerificationCode(
-        email=resend_data.email,
-        code=new_code,
-        code_type=resend_data.code_type,
-        expires_at=datetime.now() + timedelta(minutes=expires_in_minutes)
+    code = generate_code()
+    verification = VerificationCode(
+        email=email_data.email,
+        code=code,
+        code_type="email" if not user.is_verified else "password_reset",
+        expires_at=datetime.utcnow() + timedelta(minutes=10)
     )
-
-    db.add(verification_code)
+    db.add(verification)
     db.commit()
 
-    # Send appropriate email
+    # Send email
     try:
-        if resend_data.code_type == "password_reset":
-            email_result = await send_password_reset_email(resend_data.email, user.fullname, new_code)
-            message = "Password reset code resent"
-        else:  # email_verification
-            email_result = await send_verification_email(resend_data.email, user.fullname, new_code)
-            message = "Email verification code resent"
-
-        if email_result["status"] == "error":
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to send email. Please try again later."
-            )
-
-        return {
-            "message": f"{message} to {resend_data.email}",
-            "status": "success",
-            "email": resend_data.email,
-            "expires_in_minutes": expires_in_minutes
-        }
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send email. Please try again later."
-        )
+        if not user.is_verified:
+            await send_verification_email(email_data.email, user.fullname, code)
+        else:
+            await send_password_reset_email(email_data.email, user.fullname, code)
+        return success_response("Verification code sent")
+    except:
+        error_response("Failed to send email", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
