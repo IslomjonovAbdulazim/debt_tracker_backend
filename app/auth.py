@@ -1,3 +1,5 @@
+# Updated auth.py with multiple email configuration options
+
 import random
 import string
 from datetime import datetime, timedelta
@@ -9,6 +11,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from sqlalchemy.orm import Session
 import logging
+import os
 
 from app.config import settings
 from app.database import get_db, User
@@ -28,20 +31,53 @@ ACCESS_TOKEN_EXPIRE_DAYS = 7
 # Security scheme
 security = HTTPBearer()
 
-# Email configuration
-mail_config = ConnectionConfig(
-    MAIL_USERNAME=settings.MAIL_USERNAME,
-    MAIL_PASSWORD=settings.MAIL_PASSWORD,
-    MAIL_FROM=settings.MAIL_FROM,
-    MAIL_PORT=587,
-    MAIL_SERVER="smtp.gmail.com",
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=False,
-    MAIL_FROM_NAME=settings.APP_NAME
-)
 
+# Email configuration with multiple options
+def get_mail_config():
+    """Get email configuration based on environment"""
+
+    # Check if we should use alternative ports
+    mail_port = int(os.getenv("MAIL_PORT", "587"))
+    mail_server = os.getenv("MAIL_SERVER", "smtp.gmail.com")
+    use_tls = os.getenv("MAIL_USE_TLS", "True").lower() == "true"
+    use_ssl = os.getenv("MAIL_USE_SSL", "False").lower() == "true"
+
+    # Try different configurations based on environment
+    if os.getenv("USE_SMTP_SSL", "False").lower() == "true":
+        # Option 1: SSL/TLS on port 465 (often works when 587 is blocked)
+        mail_config = ConnectionConfig(
+            MAIL_USERNAME=settings.MAIL_USERNAME,
+            MAIL_PASSWORD=settings.MAIL_PASSWORD,
+            MAIL_FROM=settings.MAIL_FROM,
+            MAIL_PORT=465,
+            MAIL_SERVER="smtp.gmail.com",
+            MAIL_STARTTLS=False,
+            MAIL_SSL_TLS=True,
+            USE_CREDENTIALS=True,
+            VALIDATE_CERTS=True,
+            MAIL_FROM_NAME=settings.APP_NAME
+        )
+    else:
+        # Option 2: Standard TLS on port 587
+        mail_config = ConnectionConfig(
+            MAIL_USERNAME=settings.MAIL_USERNAME,
+            MAIL_PASSWORD=settings.MAIL_PASSWORD,
+            MAIL_FROM=settings.MAIL_FROM,
+            MAIL_PORT=mail_port,
+            MAIL_SERVER=mail_server,
+            MAIL_STARTTLS=use_tls,
+            MAIL_SSL_TLS=use_ssl,
+            USE_CREDENTIALS=True,
+            VALIDATE_CERTS=False,
+            MAIL_FROM_NAME=settings.APP_NAME,
+            TIMEOUT=30  # Increase timeout
+        )
+
+    return mail_config
+
+
+# Initialize FastMail with configuration
+mail_config = get_mail_config()
 fastmail = FastMail(mail_config)
 
 
@@ -94,10 +130,15 @@ def get_current_user(
     return user
 
 
-# Email functions
+# Email functions with fallback options
 async def send_verification_email(email: str, name: str, code: str):
     """Send email verification code"""
     logger.info(f"Attempting to send verification email to {email}")
+
+    # Check if we should skip email in development
+    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
+        logger.warning(f"SKIP_EMAIL_SEND is True. Verification code for {email}: {code}")
+        return
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -125,12 +166,22 @@ async def send_verification_email(email: str, name: str, code: str):
         logger.info(f"Verification email sent successfully to {email}")
     except Exception as e:
         logger.error(f"Failed to send verification email to {email}: {str(e)}")
+
+        # Log the verification code in development mode
+        if settings.DEBUG:
+            logger.info(f"DEBUG MODE - Verification code for {email}: {code}")
+
         raise
 
 
 async def send_password_reset_email(email: str, name: str, code: str):
     """Send password reset code"""
     logger.info(f"Attempting to send password reset email to {email}")
+
+    # Check if we should skip email in development
+    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
+        logger.warning(f"SKIP_EMAIL_SEND is True. Password reset code for {email}: {code}")
+        return
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -158,4 +209,9 @@ async def send_password_reset_email(email: str, name: str, code: str):
         logger.info(f"Password reset email sent successfully to {email}")
     except Exception as e:
         logger.error(f"Failed to send password reset email to {email}: {str(e)}")
+
+        # Log the reset code in development mode
+        if settings.DEBUG:
+            logger.info(f"DEBUG MODE - Password reset code for {email}: {code}")
+
         raise
