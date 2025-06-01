@@ -1,4 +1,4 @@
-# database.py
+# app/database.py
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -29,22 +29,7 @@ def create_tables():
     Base.metadata.create_all(bind=engine)
 
 
-# Debts table
-class Debt(Base):
-    __tablename__ = "debts"
-
-    id = Column(Integer, primary_key=True, index=True)
-    debt_amount = Column(Float)
-    description = Column(String)
-    due_date = Column(DateTime)
-    is_paid = Column(Boolean, default=False)
-    is_my_debt = Column(Boolean)  # True = I owe them, False = they owe me
-    contact_id = Column(Integer, ForeignKey("contacts.id"))
-    created_at = Column(DateTime, default=datetime.now)
-
-    # Relationship
-    contact = relationship("Contact", back_populates="debts")
-
+# Database Models (Tables)
 
 # Users table
 class User(Base):
@@ -54,7 +39,7 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     password = Column(String)  # Will be hashed
     fullname = Column(String)
-    is_email_verified = Column(Boolean, default=False)  # NEW: Email verification status
+    is_email_verified = Column(Boolean, default=False)  # Email verification status
     created_at = Column(DateTime, default=datetime.now)
 
     # Relationship: one user has many contacts
@@ -74,6 +59,23 @@ class Contact(Base):
     # Relationships
     owner = relationship("User", back_populates="contacts")
     debts = relationship("Debt", back_populates="contact")
+
+
+# Debts table
+class Debt(Base):
+    __tablename__ = "debts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    debt_amount = Column(Float)
+    description = Column(String)
+    due_date = Column(DateTime)
+    is_paid = Column(Boolean, default=False)
+    is_my_debt = Column(Boolean)  # True = I owe them, False = they owe me
+    contact_id = Column(Integer, ForeignKey("contacts.id"))
+    created_at = Column(DateTime, default=datetime.now)
+
+    # Relationship
+    contact = relationship("Contact", back_populates="debts")
 
 
 # Verification codes table

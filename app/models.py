@@ -1,4 +1,4 @@
-# models.py
+# app/models.py
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 from typing import Optional
@@ -65,7 +65,7 @@ class DebtResponse(BaseModel):
         from_attributes = True
 
 
-# Other models
+# Authentication models
 class ForgotPassword(BaseModel):
     email: str
 
