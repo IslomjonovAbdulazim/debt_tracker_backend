@@ -1,12 +1,19 @@
 # app/database.py
+import os
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
 
-# Create SQLite database (creates debt_tracker.db file)
-DATABASE_URL = "sqlite:///./debt_tracker.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# Get database URL from environment variable or use SQLite as fallback
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./debt_tracker.db")
+
+# Create engine - works for both PostgreSQL and SQLite
+if DATABASE_URL.startswith("postgresql"):
+    engine = create_engine(DATABASE_URL)
+else:
+    # SQLite fallback for local development
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
 # Create session for database operations
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -15,7 +22,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# Function to get database session (defined early)
+# Function to get database session
 def get_db():
     db = SessionLocal()
     try:
@@ -24,12 +31,12 @@ def get_db():
         db.close()
 
 
-# Function to create all tables (defined early)
+# Function to create all tables
 def create_tables():
     Base.metadata.create_all(bind=engine)
 
 
-# Database Models (Tables)
+# Database Models (Tables) - Same as before
 
 # Users table
 class User(Base):

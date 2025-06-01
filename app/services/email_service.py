@@ -1,18 +1,19 @@
 # app/services/email_service.py
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from typing import List
+from app.config import settings
 
-# Email configuration with your actual Gmail settings
+# Email configuration using settings
 conf = ConnectionConfig(
-    MAIL_USERNAME="islomjonov.abdulazim.27@gmail.com",  # Your email
-    MAIL_PASSWORD="pkaluadtivormjjl",  # App password WITHOUT spaces
-    MAIL_FROM="islomjonov.abdulazim.27@gmail.com",  # Your email
+    MAIL_USERNAME=settings.MAIL_USERNAME,
+    MAIL_PASSWORD=settings.MAIL_PASSWORD,
+    MAIL_FROM=settings.MAIL_FROM,
     MAIL_PORT=587,
     MAIL_SERVER="smtp.gmail.com",
     MAIL_STARTTLS=True,
     MAIL_SSL_TLS=False,
     USE_CREDENTIALS=True,
-    VALIDATE_CERTS=False,  # Changed to False to bypass SSL verification
+    VALIDATE_CERTS=False,
     MAIL_FROM_NAME="Debt Tracker App"
 )
 
