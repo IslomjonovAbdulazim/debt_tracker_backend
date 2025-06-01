@@ -10,7 +10,7 @@ class Settings:
     # Database
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
-        "sqlite:///./debt_tracker.db"  # Fallback to SQLite for local development
+        "sqlite:///./debt_tracker.db"
     )
 
     # Email Configuration
@@ -25,6 +25,20 @@ class Settings:
     # App Settings
     APP_NAME: str = "Debt Tracker API"
     APP_VERSION: str = "1.0.0"
+
+    # OAuth Settings
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    API_URL: str = os.getenv("API_URL", "http://localhost:8000")
+
+    # Google OAuth
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    GOOGLE_REDIRECT_URI: str = f"{API_URL}/auth/google/callback"
+
+    # GitHub OAuth
+    GITHUB_CLIENT_ID: str = os.getenv("GITHUB_CLIENT_ID", "")
+    GITHUB_CLIENT_SECRET: str = os.getenv("GITHUB_CLIENT_SECRET", "")
+    GITHUB_REDIRECT_URI: str = f"{API_URL}/auth/github/callback"
 
 
 # Create settings instance

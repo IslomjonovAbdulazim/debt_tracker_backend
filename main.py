@@ -38,6 +38,11 @@ app.add_exception_handler(Exception, general_exception_handler)
 app.include_router(auth.router)
 app.include_router(contacts.router)
 
+# Import and include social auth router
+from app.routers import social_auth
+
+app.include_router(social_auth.router)
+
 
 # Root endpoint with standardized response
 @app.get("/")

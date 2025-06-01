@@ -1,5 +1,6 @@
 # app/database.py
 import os
+import sqlalchemy
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -44,13 +45,40 @@ class User(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
-    password = Column(String)  # Will be hashed
+    password = Column(String, nullable=True)  # Nullable for social auth users
     fullname = Column(String)
-    is_email_verified = Column(Boolean, default=False)  # Email verification status
+    is_email_verified = Column(Boolean, default=False)
+    avatar_url = Column(String, nullable=True)  # Profile picture URL
+    auth_provider = Column(String, default="email")  # "email", "google", "github"
+    provider_id = Column(String, nullable=True)  # Social provider user ID
     created_at = Column(DateTime, default=datetime.now)
 
     # Relationship: one user has many contacts
     contacts = relationship("Contact", back_populates="owner")
+    social_accounts = relationship("SocialAccount", back_populates="user")
+
+
+# Social accounts table for linking multiple providers
+class SocialAccount(Base):
+    __tablename__ = "social_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    provider = Column(String, nullable=False)  # "google", "github", etc.
+    provider_id = Column(String, nullable=False)  # Provider's user ID
+    provider_email = Column(String, nullable=True)  # Email from provider
+    access_token = Column(String, nullable=True)  # For API calls (encrypted)
+    refresh_token = Column(String, nullable=True)  # For token refresh
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # Relationships
+    user = relationship("User", back_populates="social_accounts")
+
+    # Unique constraint for provider + provider_id
+    __table_args__ = (
+        sqlalchemy.UniqueConstraint('provider', 'provider_id', name='_provider_user_uc'),
+    )
 
 
 # Contacts table
