@@ -3,19 +3,28 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
+import logging
 
 from app.config import settings
 from app.database import create_tables
 from app.responses import success_response
 from app.routers import auth, contacts, debts
 
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Create database tables
 create_tables()
+logger.info("Database tables created/verified")
 
 # Create FastAPI app
 app = FastAPI(
     title=settings.APP_NAME,
-    description="A simple debt tracking API",
+    description="A simple debt tracking API with email verification",
     version=settings.APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc"
@@ -61,12 +70,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+
     return JSONResponse(
         status_code=500,
         content={
             "success": False,
             "message": "Internal server error",
-            "errors": [str(exc)] if settings.DEBUG else [],
+            "errors": [str(exc)] if settings.DEBUG else ["An unexpected error occurred"],
             "timestamp": datetime.utcnow().isoformat()
         }
     )
@@ -86,7 +97,8 @@ def read_root():
         data={
             "version": settings.APP_VERSION,
             "docs": "/docs",
-            "status": "healthy"
+            "status": "healthy",
+            "debug_mode": settings.DEBUG
         }
     )
 
@@ -94,4 +106,22 @@ def read_root():
 # Health check
 @app.get("/health")
 def health_check():
-    return success_response("API is healthy")
+    return success_response("API is healthy", {
+        "database": "connected",
+        "email_configured": bool(settings.MAIL_USERNAME and settings.MAIL_PASSWORD),
+        "debug_mode": settings.DEBUG
+    })
+
+
+# Email configuration check (only in debug mode)
+if settings.DEBUG:
+    @app.get("/debug/email-config")
+    def check_email_config():
+        """Debug endpoint to check email configuration"""
+        return success_response("Email configuration", {
+            "mail_username_set": bool(settings.MAIL_USERNAME),
+            "mail_password_set": bool(settings.MAIL_PASSWORD),
+            "mail_from_set": bool(settings.MAIL_FROM),
+            "mail_username": settings.MAIL_USERNAME if settings.MAIL_USERNAME else "NOT SET",
+            "warning": "Make sure you're using an app-specific password for Gmail, not your regular password!"
+        })

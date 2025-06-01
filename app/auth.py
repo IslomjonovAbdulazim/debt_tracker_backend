@@ -8,10 +8,14 @@ from fastapi import Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from sqlalchemy.orm import Session
+import logging
 
 from app.config import settings
 from app.database import get_db, User
 from app.responses import error_response
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -93,6 +97,8 @@ def get_current_user(
 # Email functions
 async def send_verification_email(email: str, name: str, code: str):
     """Send email verification code"""
+    logger.info(f"Attempting to send verification email to {email}")
+
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #333;">Email Verification</h2>
@@ -102,22 +108,30 @@ async def send_verification_email(email: str, name: str, code: str):
             {code}
         </div>
         <p>This code expires in 10 minutes.</p>
+        <p>If you didn't request this, please ignore this email.</p>
         <p>Best regards,<br>{settings.APP_NAME}</p>
     </div>
     """
 
-    message = MessageSchema(
-        subject=f"{settings.APP_NAME} - Email Verification",
-        recipients=[email],
-        body=html_content,
-        subtype=MessageType.html
-    )
+    try:
+        message = MessageSchema(
+            subject=f"{settings.APP_NAME} - Email Verification",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html
+        )
 
-    await fastmail.send_message(message)
+        await fastmail.send_message(message)
+        logger.info(f"Verification email sent successfully to {email}")
+    except Exception as e:
+        logger.error(f"Failed to send verification email to {email}: {str(e)}")
+        raise
 
 
 async def send_password_reset_email(email: str, name: str, code: str):
     """Send password reset code"""
+    logger.info(f"Attempting to send password reset email to {email}")
+
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #333;">Password Reset</h2>
@@ -132,11 +146,16 @@ async def send_password_reset_email(email: str, name: str, code: str):
     </div>
     """
 
-    message = MessageSchema(
-        subject=f"{settings.APP_NAME} - Password Reset",
-        recipients=[email],
-        body=html_content,
-        subtype=MessageType.html
-    )
+    try:
+        message = MessageSchema(
+            subject=f"{settings.APP_NAME} - Password Reset",
+            recipients=[email],
+            body=html_content,
+            subtype=MessageType.html
+        )
 
-    await fastmail.send_message(message)
+        await fastmail.send_message(message)
+        logger.info(f"Password reset email sent successfully to {email}")
+    except Exception as e:
+        logger.error(f"Failed to send password reset email to {email}: {str(e)}")
+        raise
