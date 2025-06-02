@@ -1,4 +1,4 @@
-# Updated auth.py with multiple email configuration options
+# Updated auth.py with automatic fallback system (try option 1, if fail try option 2, etc.)
 
 import random
 import string
@@ -12,6 +12,10 @@ from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from sqlalchemy.orm import Session
 import logging
 import os
+import asyncio
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from app.config import settings
 from app.database import get_db, User
@@ -32,53 +36,163 @@ ACCESS_TOKEN_EXPIRE_DAYS = 7
 security = HTTPBearer()
 
 
-# Email configuration with multiple options
-def get_mail_config():
-    """Get email configuration based on environment"""
+async def send_email_auto_fallback(subject: str, recipient: str, html_content: str):
+    """
+    Automatic fallback email system:
+    Option 1: Gmail TLS port 587 (most common)
+    Option 2: Gmail SSL port 465 (when 587 is blocked)
+    Option 3: Gmail port 25 (backup)
+    Option 4: Direct SMTP fallback
+    Option 5: Log only (if all fail)
+    """
 
-    # Check if we should use alternative ports
-    mail_port = int(os.getenv("MAIL_PORT", "587"))
-    mail_server = os.getenv("MAIL_SERVER", "smtp.gmail.com")
-    use_tls = os.getenv("MAIL_USE_TLS", "True").lower() == "true"
-    use_ssl = os.getenv("MAIL_USE_SSL", "False").lower() == "true"
+    # Check if we should skip email entirely
+    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
+        logger.warning(f"SKIP_EMAIL_SEND is True. Email skipped for {recipient}")
+        return True
 
-    # Try different configurations based on environment
-    if os.getenv("USE_SMTP_SSL", "False").lower() == "true":
-        # Option 1: SSL/TLS on port 465 (often works when 587 is blocked)
-        mail_config = ConnectionConfig(
-            MAIL_USERNAME=settings.MAIL_USERNAME,
-            MAIL_PASSWORD=settings.MAIL_PASSWORD,
-            MAIL_FROM=settings.MAIL_FROM,
-            MAIL_PORT=465,
-            MAIL_SERVER="smtp.gmail.com",
-            MAIL_STARTTLS=False,
-            MAIL_SSL_TLS=True,
-            USE_CREDENTIALS=True,
-            VALIDATE_CERTS=True,
-            MAIL_FROM_NAME=settings.APP_NAME
-        )
+    # If no credentials, skip to logging
+    if not settings.MAIL_USERNAME or not settings.MAIL_PASSWORD:
+        logger.warning(f"No email credentials. Email content logged for {recipient}")
+        logger.info(f"Subject: {subject}")
+        logger.info(f"Content: {html_content}")
+        return True
+
+    # Define email options in order of preference
+    email_options = [
+        # Option 1: Standard Gmail TLS (most reliable)
+        {
+            "name": "Gmail TLS 587",
+            "method": "fastmail",
+            "config": {
+                "MAIL_PORT": 587,
+                "MAIL_SERVER": "smtp.gmail.com",
+                "MAIL_STARTTLS": True,
+                "MAIL_SSL_TLS": False,
+                "timeout": 10
+            }
+        },
+        # Option 2: Gmail SSL (when TLS is blocked)
+        {
+            "name": "Gmail SSL 465",
+            "method": "fastmail",
+            "config": {
+                "MAIL_PORT": 465,
+                "MAIL_SERVER": "smtp.gmail.com",
+                "MAIL_STARTTLS": False,
+                "MAIL_SSL_TLS": True,
+                "timeout": 10
+            }
+        },
+        # Option 3: Alternative port (some servers use this)
+        {
+            "name": "Gmail Port 25",
+            "method": "fastmail",
+            "config": {
+                "MAIL_PORT": 25,
+                "MAIL_SERVER": "smtp.gmail.com",
+                "MAIL_STARTTLS": True,
+                "MAIL_SSL_TLS": False,
+                "timeout": 10
+            }
+        },
+        # Option 4: Direct SMTP TLS
+        {
+            "name": "Direct SMTP TLS",
+            "method": "direct_smtp",
+            "config": {"host": "smtp.gmail.com", "port": 587, "use_tls": True}
+        },
+        # Option 5: Direct SMTP SSL
+        {
+            "name": "Direct SMTP SSL",
+            "method": "direct_smtp",
+            "config": {"host": "smtp.gmail.com", "port": 465, "use_ssl": True}
+        }
+    ]
+
+    # Try each option until one works
+    for i, option in enumerate(email_options, 1):
+        try:
+            logger.info(f"Trying Option {i}: {option['name']}")
+
+            if option["method"] == "fastmail":
+                success = await try_fastmail(option, subject, recipient, html_content)
+            else:
+                success = await try_direct_smtp(option, subject, recipient, html_content)
+
+            if success:
+                logger.info(f"✅ Email sent successfully using Option {i}: {option['name']}")
+                return True
+
+        except Exception as e:
+            logger.warning(f"❌ Option {i} ({option['name']}) failed: {str(e)}")
+            continue
+
+    # If all options fail, log the content for debugging
+    logger.error("❌ All email sending options failed!")
+    if settings.DEBUG:
+        logger.info(f"DEBUG MODE - Email content for {recipient}:")
+        logger.info(f"Subject: {subject}")
+        logger.info(f"HTML Content: {html_content}")
+
+    return False
+
+
+async def try_fastmail(option, subject: str, recipient: str, html_content: str):
+    """Try sending email using FastMail with specific configuration"""
+    config = ConnectionConfig(
+        MAIL_USERNAME=settings.MAIL_USERNAME,
+        MAIL_PASSWORD=settings.MAIL_PASSWORD,
+        MAIL_FROM=settings.MAIL_FROM,
+        MAIL_PORT=option["config"]["MAIL_PORT"],
+        MAIL_SERVER=option["config"]["MAIL_SERVER"],
+        MAIL_STARTTLS=option["config"]["MAIL_STARTTLS"],
+        MAIL_SSL_TLS=option["config"]["MAIL_SSL_TLS"],
+        USE_CREDENTIALS=True,
+        VALIDATE_CERTS=False,
+        MAIL_FROM_NAME=settings.APP_NAME,
+        TIMEOUT=option["config"]["timeout"]
+    )
+
+    fastmail = FastMail(config)
+    message = MessageSchema(
+        subject=subject,
+        recipients=[recipient],
+        body=html_content,
+        subtype=MessageType.html
+    )
+
+    # Send with timeout
+    await asyncio.wait_for(fastmail.send_message(message), timeout=15.0)
+    return True
+
+
+async def try_direct_smtp(option, subject: str, recipient: str, html_content: str):
+    """Try sending email using direct SMTP"""
+    config = option["config"]
+
+    # Create message
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = settings.MAIL_FROM or settings.MAIL_USERNAME
+    msg['To'] = recipient
+
+    # Add HTML part
+    html_part = MIMEText(html_content, 'html')
+    msg.attach(html_part)
+
+    # Connect and send
+    if config.get("use_ssl"):
+        server = smtplib.SMTP_SSL(config['host'], config['port'], timeout=10)
     else:
-        # Option 2: Standard TLS on port 587
-        mail_config = ConnectionConfig(
-            MAIL_USERNAME=settings.MAIL_USERNAME,
-            MAIL_PASSWORD=settings.MAIL_PASSWORD,
-            MAIL_FROM=settings.MAIL_FROM,
-            MAIL_PORT=mail_port,
-            MAIL_SERVER=mail_server,
-            MAIL_STARTTLS=use_tls,
-            MAIL_SSL_TLS=use_ssl,
-            USE_CREDENTIALS=True,
-            VALIDATE_CERTS=False,
-            MAIL_FROM_NAME=settings.APP_NAME,
-            TIMEOUT=30  # Increase timeout
-        )
+        server = smtplib.SMTP(config['host'], config['port'], timeout=10)
+        if config.get("use_tls"):
+            server.starttls()
 
-    return mail_config
-
-
-# Initialize FastMail with configuration
-mail_config = get_mail_config()
-fastmail = FastMail(mail_config)
+    server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
+    server.send_message(msg)
+    server.quit()
+    return True
 
 
 # Password functions
@@ -130,15 +244,10 @@ def get_current_user(
     return user
 
 
-# Email functions with fallback options
+# Simplified email functions
 async def send_verification_email(email: str, name: str, code: str):
-    """Send email verification code"""
-    logger.info(f"Attempting to send verification email to {email}")
-
-    # Check if we should skip email in development
-    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
-        logger.warning(f"SKIP_EMAIL_SEND is True. Verification code for {email}: {code}")
-        return
+    """Send email verification code with automatic fallback"""
+    logger.info(f"Sending verification email to {email}")
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -154,34 +263,22 @@ async def send_verification_email(email: str, name: str, code: str):
     </div>
     """
 
-    try:
-        message = MessageSchema(
-            subject=f"{settings.APP_NAME} - Email Verification",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html
-        )
+    success = await send_email_auto_fallback(
+        subject=f"{settings.APP_NAME} - Email Verification",
+        recipient=email,
+        html_content=html_content
+    )
 
-        await fastmail.send_message(message)
-        logger.info(f"Verification email sent successfully to {email}")
-    except Exception as e:
-        logger.error(f"Failed to send verification email to {email}: {str(e)}")
-
-        # Log the verification code in development mode
+    if not success:
+        logger.error(f"Failed to send verification email to {email}")
         if settings.DEBUG:
             logger.info(f"DEBUG MODE - Verification code for {email}: {code}")
-
-        raise
+        raise Exception("Email sending failed after trying all methods")
 
 
 async def send_password_reset_email(email: str, name: str, code: str):
-    """Send password reset code"""
-    logger.info(f"Attempting to send password reset email to {email}")
-
-    # Check if we should skip email in development
-    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
-        logger.warning(f"SKIP_EMAIL_SEND is True. Password reset code for {email}: {code}")
-        return
+    """Send password reset code with automatic fallback"""
+    logger.info(f"Sending password reset email to {email}")
 
     html_content = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -197,21 +294,41 @@ async def send_password_reset_email(email: str, name: str, code: str):
     </div>
     """
 
-    try:
-        message = MessageSchema(
-            subject=f"{settings.APP_NAME} - Password Reset",
-            recipients=[email],
-            body=html_content,
-            subtype=MessageType.html
-        )
+    success = await send_email_auto_fallback(
+        subject=f"{settings.APP_NAME} - Password Reset",
+        recipient=email,
+        html_content=html_content
+    )
 
-        await fastmail.send_message(message)
-        logger.info(f"Password reset email sent successfully to {email}")
-    except Exception as e:
-        logger.error(f"Failed to send password reset email to {email}: {str(e)}")
-
-        # Log the reset code in development mode
+    if not success:
+        logger.error(f"Failed to send password reset email to {email}")
         if settings.DEBUG:
             logger.info(f"DEBUG MODE - Password reset code for {email}: {code}")
+        raise Exception("Email sending failed after trying all methods")
 
-        raise
+
+# Test function
+async def test_email_configuration():
+    """Test the automatic fallback email system"""
+    logger.info("Testing automatic email fallback system...")
+
+    try:
+        success = await send_email_auto_fallback(
+            subject="Test Email - Auto Fallback System",
+            recipient=settings.MAIL_USERNAME,  # Send to self
+            html_content="""
+            <div style="font-family: Arial, sans-serif;">
+                <h2>✅ Email Test Successful!</h2>
+                <p>This email was sent using the automatic fallback system.</p>
+                <p>Your email configuration is working correctly!</p>
+            </div>
+            """
+        )
+
+        if success:
+            return ["✅ Auto-fallback email system is working!"]
+        else:
+            return ["❌ All email methods failed in auto-fallback system"]
+
+    except Exception as e:
+        return [f"❌ Email test failed: {str(e)}"]
