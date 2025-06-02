@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from pydantic import BaseModel, EmailStr
 
+from app.config import settings
 from app.database import get_db, User, VerificationCode
 from app.auth import (
     hash_password, verify_password, generate_code, create_access_token,
-    send_verification_email, send_password_reset_email, get_current_user
+    send_verification_email, send_password_reset_email, get_current_user,
+    verify_code_with_fallback, cleanup_temp_codes
 )
 from app.responses import success_response, error_response
 
@@ -41,8 +43,8 @@ class ResetPassword(BaseModel):
 
 
 @router.post("/register")
-async def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    """Register new user"""
+def register(user_data: UserRegister, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Register new user with improved email handling"""
     # Check if user exists
     existing_user = db.query(User).filter(User.email == user_data.email).first()
 
@@ -72,26 +74,32 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
             db.add(verification)
             db.commit()
 
-            # Send email
+            # Send email with fallback
             try:
-                await send_verification_email(user_data.email, user_data.fullname, code)
-                email_sent = True
-                email_error = None
-            except Exception as e:
-                email_sent = False
-                email_error = str(e)
+                email_result = send_verification_email(user_data.email, user_data.fullname, code, background_tasks)
 
-            return success_response(
-                "Registration updated. Please verify your email",
-                {
-                    "user_id": existing_user.id,
-                    "email": existing_user.email,
-                    "email_sent": email_sent,
-                    "email_error": email_error if not email_sent else None,
-                    "message": "New verification code sent. Please check your email."
-                },
-                status_code=200
-            )
+                return success_response(
+                    "Registration updated successfully",
+                    {
+                        "user_id": existing_user.id,
+                        "email": existing_user.email,
+                        "email_sent": email_result["email_sent"],
+                        "fallback_used": email_result["fallback_used"],
+                        "message": email_result["message"]
+                    },
+                    status_code=200
+                )
+            except Exception as e:
+                return success_response(
+                    "Registration updated - email service unavailable",
+                    {
+                        "user_id": existing_user.id,
+                        "email": existing_user.email,
+                        "email_sent": False,
+                        "message": f"Registration successful but email failed: {str(e)}. Contact support for manual verification."
+                    },
+                    status_code=200
+                )
         else:
             # User is already verified
             error_response("Email already registered and verified", status_code=status.HTTP_400_BAD_REQUEST)
@@ -116,54 +124,40 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
     db.add(verification)
     db.commit()
 
-    # Send email
+    # Send email with fallback
     try:
-        await send_verification_email(user_data.email, user_data.fullname, code)
-        email_sent = True
-        email_error = None
-    except Exception as e:
-        email_sent = False
-        email_error = str(e)
+        email_result = send_verification_email(user_data.email, user_data.fullname, code, background_tasks)
 
-    return success_response(
-        "User registered successfully",
-        {
-            "user_id": user.id,
-            "email": user.email,
-            "email_sent": email_sent,
-            "email_error": email_error if not email_sent else None,
-            "message": "Please check your email for verification code" if email_sent else "Email sending failed. Use /auth/resend-code to retry."
-        },
-        status_code=201
-    )
+        return success_response(
+            "User registered successfully",
+            {
+                "user_id": user.id,
+                "email": user.email,
+                "email_sent": email_result["email_sent"],
+                "fallback_used": email_result["fallback_used"],
+                "message": email_result["message"]
+            },
+            status_code=201
+        )
+    except Exception as e:
+        return success_response(
+            "User registered - email service unavailable",
+            {
+                "user_id": user.id,
+                "email": user.email,
+                "email_sent": False,
+                "message": f"Registration successful but email failed: {str(e)}. Contact support for manual verification."
+            },
+            status_code=201
+        )
 
 
 @router.post("/verify-email")
 def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
-    """Verify email with code"""
-    # Find valid code
-    code_record = db.query(VerificationCode).filter(
-        VerificationCode.email == verify_data.email,
-        VerificationCode.code == verify_data.code,
-        VerificationCode.code_type == "email",
-        VerificationCode.used == False,
-        VerificationCode.expires_at > datetime.utcnow()
-    ).first()
-
-    if not code_record:
-        # Check if code exists but expired
-        expired_code = db.query(VerificationCode).filter(
-            VerificationCode.email == verify_data.email,
-            VerificationCode.code == verify_data.code,
-            VerificationCode.code_type == "email",
-            VerificationCode.used == False
-        ).first()
-
-        if expired_code:
-            error_response("Verification code expired. Please request a new one.",
-                           status_code=status.HTTP_400_BAD_REQUEST)
-        else:
-            error_response("Invalid verification code", status_code=status.HTTP_400_BAD_REQUEST)
+    """Verify email with code (supports fallback codes)"""
+    # Use enhanced verification that checks both DB and temp storage
+    if not verify_code_with_fallback(verify_data.email, verify_data.code, "email", db):
+        error_response("Invalid or expired verification code", status_code=status.HTTP_400_BAD_REQUEST)
 
     # Find user and verify
     user = db.query(User).filter(User.email == verify_data.email).first()
@@ -171,7 +165,6 @@ def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
         error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
 
     user.is_verified = True
-    code_record.used = True
     db.commit()
 
     # Clean up old verification codes for this user
@@ -182,7 +175,11 @@ def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
     ).delete()
     db.commit()
 
-    return success_response("Email verified successfully")
+    return success_response("Email verified successfully", {
+        "user_id": user.id,
+        "email": user.email,
+        "verified": True
+    })
 
 
 @router.post("/login")
@@ -233,7 +230,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 
 @router.post("/forgot-password")
-async def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
+def forgot_password(forgot_data: ForgotPassword, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Request password reset"""
     user = db.query(User).filter(User.email == forgot_data.email).first()
     if not user:
@@ -258,27 +255,35 @@ async def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get
     db.add(verification)
     db.commit()
 
-    # Send email
+    # Send email with fallback
     try:
-        await send_password_reset_email(forgot_data.email, user.fullname, code)
-        return success_response("Password reset code sent to your email")
+        email_result = send_password_reset_email(forgot_data.email, user.fullname, code, background_tasks)
+
+        return success_response(
+            "Password reset requested",
+            {
+                "email": forgot_data.email,
+                "email_sent": email_result["email_sent"],
+                "fallback_used": email_result["fallback_used"],
+                "message": email_result["message"]
+            }
+        )
     except Exception as e:
-        error_response(f"Failed to send email: {str(e)}", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return success_response(
+            "Password reset requested - email service unavailable",
+            {
+                "email": forgot_data.email,
+                "email_sent": False,
+                "message": f"Reset code generated but email failed: {str(e)}. Contact support for assistance."
+            }
+        )
 
 
 @router.post("/reset-password")
 def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
-    """Reset password with code"""
-    # Find valid code
-    code_record = db.query(VerificationCode).filter(
-        VerificationCode.email == reset_data.email,
-        VerificationCode.code == reset_data.code,
-        VerificationCode.code_type == "password_reset",
-        VerificationCode.used == False,
-        VerificationCode.expires_at > datetime.utcnow()
-    ).first()
-
-    if not code_record:
+    """Reset password with code (supports fallback codes)"""
+    # Use enhanced verification that checks both DB and temp storage
+    if not verify_code_with_fallback(reset_data.email, reset_data.code, "password_reset", db):
         error_response("Invalid or expired reset code", status_code=status.HTTP_400_BAD_REQUEST)
 
     # Find user and update password
@@ -287,7 +292,6 @@ def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
         error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
 
     user.password = hash_password(reset_data.new_password)
-    code_record.used = True
     db.commit()
 
     # Clean up old codes
@@ -298,11 +302,14 @@ def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
     ).delete()
     db.commit()
 
-    return success_response("Password reset successfully")
+    return success_response("Password reset successfully", {
+        "email": reset_data.email,
+        "reset_completed": True
+    })
 
 
 @router.post("/resend-code")
-async def resend_code(email_data: ForgotPassword, db: Session = Depends(get_db)):
+def resend_code(email_data: ForgotPassword, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Resend verification code"""
     user = db.query(User).filter(User.email == email_data.email).first()
     if not user:
@@ -334,22 +341,34 @@ async def resend_code(email_data: ForgotPassword, db: Session = Depends(get_db))
     db.add(verification)
     db.commit()
 
-    # Send email
+    # Send email with fallback
     try:
         if code_type == "email":
-            await send_verification_email(email_data.email, user.fullname, code)
-            message = "Email verification code sent"
+            email_result = send_verification_email(email_data.email, user.fullname, code, background_tasks)
+            message = "Email verification code resent"
         else:
-            await send_password_reset_email(email_data.email, user.fullname, code)
-            message = "Password reset code sent"
+            email_result = send_password_reset_email(email_data.email, user.fullname, code, background_tasks)
+            message = "Password reset code resent"
 
         return success_response(message, {
             "email": email_data.email,
             "code_type": code_type,
+            "email_sent": email_result["email_sent"],
+            "fallback_used": email_result["fallback_used"],
+            "message": email_result["message"],
             "expires_in_minutes": 10
         })
     except Exception as e:
-        error_response(f"Failed to send email: {str(e)}", status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return success_response(
+            f"Code generated - email service unavailable",
+            {
+                "email": email_data.email,
+                "code_type": code_type,
+                "email_sent": False,
+                "message": f"Code generated but email failed: {str(e)}. Contact support for assistance.",
+                "expires_in_minutes": 10
+            }
+        )
 
 
 @router.get("/check-verification-status/{email}")
@@ -371,3 +390,39 @@ def check_verification_status(email: EmailStr, db: Session = Depends(get_db)):
         "can_login": user.is_verified,
         "needs_verification": not user.is_verified
     })
+
+
+# Admin/Debug endpoints for manual verification (development only)
+@router.post("/manual-verify")
+def manual_verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
+    """Manual email verification (when email service is unavailable)"""
+    if not settings.DEBUG:
+        error_response("Endpoint only available in debug mode", status_code=status.HTTP_403_FORBIDDEN)
+
+    user = db.query(User).filter(User.email == verify_data.email).first()
+    if not user:
+        error_response("User not found", status_code=status.HTTP_404_NOT_FOUND)
+
+    if user.is_verified:
+        error_response("Email already verified", status_code=status.HTTP_400_BAD_REQUEST)
+
+    # Manually verify the user (for development/testing)
+    user.is_verified = True
+    db.commit()
+
+    return success_response("Email manually verified", {
+        "user_id": user.id,
+        "email": user.email,
+        "verified": True,
+        "note": "Manual verification - only available in debug mode"
+    })
+
+
+@router.post("/cleanup-temp-codes")
+def cleanup_temporary_codes():
+    """Clean up expired temporary codes"""
+    if not settings.DEBUG:
+        error_response("Endpoint only available in debug mode", status_code=status.HTTP_403_FORBIDDEN)
+
+    cleanup_temp_codes()
+    return success_response("Temporary codes cleaned up")
