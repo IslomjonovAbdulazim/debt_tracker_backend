@@ -6,8 +6,9 @@ python-multipart==0.0.19
 # Database
 sqlalchemy==2.0.23
 
-# Authentication & Security
+# Authentication & Security - Fixed bcrypt compatibility
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 python-jose[cryptography]==3.3.0
 
 # Data validation
