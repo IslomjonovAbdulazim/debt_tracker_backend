@@ -63,5 +63,9 @@ class Settings:
     ALLOW_MANUAL_VERIFICATION: bool = os.getenv("ALLOW_MANUAL_VERIFICATION", "True").lower() == "true"
     EMERGENCY_BYPASS_EMAIL: bool = os.getenv("EMERGENCY_BYPASS_EMAIL", "False").lower() == "true"
 
+    # Code Exposure Settings
+    EXPOSE_CODES_ON_EMAIL_FAILURE: bool = os.getenv("EXPOSE_CODES_ON_EMAIL_FAILURE", "True").lower() == "true"
+    HIDE_CODES_IN_PRODUCTION: bool = os.getenv("HIDE_CODES_IN_PRODUCTION", "False").lower() == "true"
+
 
 settings = Settings()

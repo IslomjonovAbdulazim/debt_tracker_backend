@@ -295,7 +295,11 @@ def send_verification_email(email: str, name: str, code: str, background_tasks: 
     email_sent = send_email_sync(email, subject, html_content)
 
     if email_sent:
-        return {"email_sent": True, "fallback_used": False, "message": "Verification code sent to your email"}
+        return {
+            "email_sent": True,
+            "fallback_used": False,
+            "message": "Verification code sent to your email"
+        }
 
     # Email failed - store code as fallback
     store_temp_code(email, code, "email", 10)
@@ -304,12 +308,26 @@ def send_verification_email(email: str, name: str, code: str, background_tasks: 
     if background_tasks:
         background_tasks.add_task(send_email_background, email, subject, html_content)
 
-    return {
+    # Return code in response when email fails (for mobile app)
+    response_data = {
         "email_sent": False,
         "fallback_used": True,
-        "message": "Email service unavailable. Code stored temporarily - contact support if needed",
-        "temp_code_stored": True
+        "message": "Email service unavailable. Please use the code below:",
+        "temp_code_stored": True,
+        "code_expires_in_minutes": 10,
+        "note": "Email service is down. Use this code to verify your account."
     }
+
+    # Only expose code if allowed by settings
+    if settings.EXPOSE_CODES_ON_EMAIL_FAILURE and not (
+            settings.HIDE_CODES_IN_PRODUCTION and settings.SERVER_ENVIRONMENT == "production"):
+        response_data["verification_code"] = code
+        response_data["show_code_to_user"] = True
+    else:
+        response_data["show_code_to_user"] = False
+        response_data["contact_support"] = "Contact support for manual verification"
+
+    return response_data
 
 
 def send_password_reset_email(email: str, name: str, code: str, background_tasks: BackgroundTasks = None) -> dict:
@@ -323,7 +341,11 @@ def send_password_reset_email(email: str, name: str, code: str, background_tasks
     email_sent = send_email_sync(email, subject, html_content)
 
     if email_sent:
-        return {"email_sent": True, "fallback_used": False, "message": "Reset code sent to your email"}
+        return {
+            "email_sent": True,
+            "fallback_used": False,
+            "message": "Reset code sent to your email"
+        }
 
     # Email failed - store code as fallback
     store_temp_code(email, code, "password_reset", 15)
@@ -332,12 +354,26 @@ def send_password_reset_email(email: str, name: str, code: str, background_tasks
     if background_tasks:
         background_tasks.add_task(send_email_background, email, subject, html_content)
 
-    return {
+    # Return code in response when email fails (for mobile app)
+    response_data = {
         "email_sent": False,
         "fallback_used": True,
-        "message": "Email service unavailable. Code stored temporarily - contact support if needed",
-        "temp_code_stored": True
+        "message": "Email service unavailable. Please use the code below:",
+        "temp_code_stored": True,
+        "code_expires_in_minutes": 15,
+        "note": "Email service is down. Use this code to reset your password."
     }
+
+    # Only expose code if allowed by settings
+    if settings.EXPOSE_CODES_ON_EMAIL_FAILURE and not (
+            settings.HIDE_CODES_IN_PRODUCTION and settings.SERVER_ENVIRONMENT == "production"):
+        response_data["verification_code"] = code
+        response_data["show_code_to_user"] = True
+    else:
+        response_data["show_code_to_user"] = False
+        response_data["contact_support"] = "Contact support for manual verification"
+
+    return response_data
 
 
 # Enhanced verification that checks both DB and temp storage
