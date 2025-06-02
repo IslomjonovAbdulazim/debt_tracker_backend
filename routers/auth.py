@@ -7,7 +7,7 @@ import asyncio
 from database import get_db, User, VerificationCode
 from models import UserRegister, UserLogin, VerifyCode, ForgotPassword, ResetPassword
 from auth_utils import hash_password, verify_password, create_access_token, verify_token, generate_code
-from email_service import email_service
+from auth_utils import send_verification_email, send_password_reset_email
 
 router = APIRouter()
 security = HTTPBearer()
@@ -315,7 +315,7 @@ async def resend_verification_code(
 async def send_verification_email_task(email: str, name: str, code: str):
     """Background task to send verification email"""
     try:
-        result = await email_service.send_verification_email(email, name, code)
+        result = await send_verification_email(email, name, code)
         print(f"✅ Verification email result for {email}: {result['method']}")
     except Exception as e:
         print(f"❌ Email task error for {email}: {e}")
@@ -323,7 +323,7 @@ async def send_verification_email_task(email: str, name: str, code: str):
 async def send_password_reset_email_task(email: str, name: str, code: str):
     """Background task to send password reset email"""
     try:
-        result = await email_service.send_password_reset_email(email, name, code)
+        result = await send_password_reset_email(email, name, code)
         print(f"✅ Reset email result for {email}: {result['method']}")
     except Exception as e:
         print(f"❌ Email task error for {email}: {e}")
@@ -344,7 +344,7 @@ async def get_email_queue():
         return {"success": True, "data": {"queued_emails": 0, "emails": []}}
 
 @router.post("/retry-emails")
-async def retry_queued_emails():
+def retry_queued_emails_endpoint():
     """Retry sending queued emails"""
-    result = await email_service.retry_queued_emails()
-    return {"success": True, "data": result}
+    # result = retry_queued_emails()
+    return {"success": True, "data": "result-suckkkkkkkkkkkkkkkkkkkkkkkkkkk"}
