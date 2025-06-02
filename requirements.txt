@@ -17,4 +17,5 @@ pydantic[email]==2.5.0
 # Environment variables
 python-dotenv==1.0.0
 
-# Note: No additional email dependencies needed for Gmail SMTP
+# Async file operations for email queue
+aiofiles==23.2.0

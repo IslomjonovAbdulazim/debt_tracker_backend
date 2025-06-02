@@ -1,18 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
+import asyncio
 
 from database import get_db, User, VerificationCode
 from models import UserRegister, UserLogin, VerifyCode, ForgotPassword, ResetPassword
-from auth_utils import (
-    hash_password, verify_password, create_access_token, verify_token,
-    generate_code, send_verification_email, send_password_reset_email
-)
+from auth_utils import hash_password, verify_password, create_access_token, verify_token, generate_code
+from email_service import email_service
 
 router = APIRouter()
 security = HTTPBearer()
-
 
 # ==================
 # DEPENDENCY: GET CURRENT USER
@@ -30,17 +28,20 @@ def get_current_user(token: str = Depends(security), db: Session = Depends(get_d
             raise HTTPException(status_code=403, detail="Email not verified")
 
         return user
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-
 # ==================
-# AUTH ROUTES
+# OPTIMIZED AUTH ROUTES
 # ==================
 
 @router.post("/register")
-def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    """Register a new user"""
+async def register(
+    user_data: UserRegister,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Register a new user with optimized email handling"""
 
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == user_data.email).first()
@@ -77,19 +78,23 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     db.add(verification)
     db.commit()
 
-    # Send verification email
-    email_result = send_verification_email(user_data.email, user_data.fullname, code)
+    # Send email in background (non-blocking)
+    background_tasks.add_task(
+        send_verification_email_task,
+        user_data.email,
+        user_data.fullname,
+        code
+    )
 
     return {
         "success": True,
-        "message": "User registered successfully. Please check your email for verification code.",
+        "message": "User registered successfully. Verification code is being sent to your email.",
         "data": {
             "user_id": user.id,
             "email": user.email,
-            "email_sent": email_result["email_sent"]
+            "email_status": "sending"
         }
     }
-
 
 @router.post("/verify-email")
 def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
@@ -126,7 +131,6 @@ def verify_email(verify_data: VerifyCode, db: Session = Depends(get_db)):
         }
     }
 
-
 @router.post("/login")
 def login(login_data: UserLogin, db: Session = Depends(get_db)):
     """Login user"""
@@ -157,11 +161,9 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
         }
     }
 
-
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     """Get current user info"""
-
     return {
         "success": True,
         "message": "User info retrieved",
@@ -174,9 +176,12 @@ def get_me(current_user: User = Depends(get_current_user)):
         }
     }
 
-
 @router.post("/forgot-password")
-def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
+async def forgot_password(
+    forgot_data: ForgotPassword,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """Request password reset"""
 
     # Find user
@@ -202,18 +207,22 @@ def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
     db.add(verification)
     db.commit()
 
-    # Send reset email
-    email_result = send_password_reset_email(forgot_data.email, user.fullname, code)
+    # Send reset email in background
+    background_tasks.add_task(
+        send_password_reset_email_task,
+        forgot_data.email,
+        user.fullname,
+        code
+    )
 
     return {
         "success": True,
-        "message": "Password reset code sent to your email address",
+        "message": "Password reset code is being sent to your email address",
         "data": {
             "email": forgot_data.email,
-            "email_sent": email_result["email_sent"]
+            "email_status": "sending"
         }
     }
-
 
 @router.post("/reset-password")
 def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
@@ -248,9 +257,12 @@ def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
         }
     }
 
-
 @router.post("/resend-code")
-def resend_verification_code(email_data: ForgotPassword, db: Session = Depends(get_db)):
+async def resend_verification_code(
+    email_data: ForgotPassword,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """Resend verification code"""
 
     # Find user
@@ -279,14 +291,60 @@ def resend_verification_code(email_data: ForgotPassword, db: Session = Depends(g
     db.add(verification)
     db.commit()
 
-    # Send email
-    email_result = send_verification_email(email_data.email, user.fullname, code)
+    # Send email in background
+    background_tasks.add_task(
+        send_verification_email_task,
+        email_data.email,
+        user.fullname,
+        code
+    )
 
     return {
         "success": True,
-        "message": "Verification code resent to your email address",
+        "message": "Verification code is being resent to your email address",
         "data": {
             "email": email_data.email,
-            "email_sent": email_result["email_sent"]
+            "email_status": "sending"
         }
     }
+
+# ==================
+# BACKGROUND TASKS
+# ==================
+
+async def send_verification_email_task(email: str, name: str, code: str):
+    """Background task to send verification email"""
+    try:
+        result = await email_service.send_verification_email(email, name, code)
+        print(f"✅ Verification email result for {email}: {result['method']}")
+    except Exception as e:
+        print(f"❌ Email task error for {email}: {e}")
+
+async def send_password_reset_email_task(email: str, name: str, code: str):
+    """Background task to send password reset email"""
+    try:
+        result = await email_service.send_password_reset_email(email, name, code)
+        print(f"✅ Reset email result for {email}: {result['method']}")
+    except Exception as e:
+        print(f"❌ Email task error for {email}: {e}")
+
+# ==================
+# ADMIN ROUTES (Optional)
+# ==================
+
+@router.get("/email-queue")
+async def get_email_queue():
+    """Get queued emails (for debugging)"""
+    try:
+        import json
+        with open("email_queue.json", 'r') as f:
+            queue = json.load(f)
+        return {"success": True, "data": {"queued_emails": len(queue), "emails": queue}}
+    except FileNotFoundError:
+        return {"success": True, "data": {"queued_emails": 0, "emails": []}}
+
+@router.post("/retry-emails")
+async def retry_queued_emails():
+    """Retry sending queued emails"""
+    result = await email_service.retry_queued_emails()
+    return {"success": True, "data": result}
