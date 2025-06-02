@@ -1,4 +1,4 @@
-# Improved auth.py with best practices for OTP email sending
+# Improved auth.py with bcrypt compatibility fix
 
 import random
 import string
@@ -13,7 +13,17 @@ from email.utils import formataddr
 import ssl
 import logging
 
-from passlib.context import CryptContext
+# Fixed bcrypt import
+try:
+    from passlib.context import CryptContext
+    # Try to create context with bcrypt
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+except Exception as e:
+    logging.warning(f"Bcrypt compatibility issue: {e}")
+    # Fallback to pbkdf2_sha256 if bcrypt fails
+    pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+    logging.info("Using pbkdf2_sha256 instead of bcrypt for password hashing")
+
 from jose import JWTError, jwt
 from fastapi import Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -25,9 +35,6 @@ from app.responses import error_response
 
 # Set up logging
 logger = logging.getLogger(__name__)
-
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT settings
 SECRET_KEY = settings.SECRET_KEY
@@ -261,13 +268,30 @@ def create_email_template(
     """
 
 
-# Password functions
+# Password functions with improved error handling
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    try:
+        return pwd_context.hash(password)
+    except Exception as e:
+        logger.error(f"Password hashing error: {e}")
+        # Fallback to basic hashing if bcrypt fails
+        import hashlib
+        import secrets
+        salt = secrets.token_hex(16)
+        return hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000).hex() + ':' + salt
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        logger.error(f"Password verification error: {e}")
+        # Fallback verification for fallback hash format
+        if ':' in hashed_password:
+            import hashlib
+            hash_part, salt = hashed_password.split(':')
+            return hashlib.pbkdf2_hmac('sha256', plain_password.encode(), salt.encode(), 100000).hex() == hash_part
+        return False
 
 
 def generate_code() -> str:
@@ -316,58 +340,48 @@ async def send_verification_email(email: str, name: str, code: str) -> bool:
     """Send email verification code"""
     logger.info(f"Sending verification email to {email}")
 
-    try:
-        html_content = create_email_template(
-            title="Email Verification",
-            name=name,
-            code=code,
-            expiry_minutes=settings.EMAIL_VERIFICATION_EXPIRY,
-            action_type="verification"
-        )
+    html_content = create_email_template(
+        title="Email Verification",
+        name=name,
+        code=code,
+        expiry_minutes=settings.EMAIL_VERIFICATION_EXPIRY,
+        action_type="verification"
+    )
 
-        success = await send_email_with_retry(
-            to_email=email,
-            subject=f"{settings.APP_NAME} - Email Verification Code",
-            html_content=html_content
-        )
+    success = await send_email_with_retry(
+        to_email=email,
+        subject=f"{settings.APP_NAME} - Email Verification Code",
+        html_content=html_content
+    )
 
-        if not success:
-            raise Exception("Failed to send verification email after retries.")
+    if not success:
+        raise Exception("Failed to send verification email. Please try again later.")
 
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to send verification email to {email}: {str(e)}")
-        raise Exception(f"Failed to send verification email: {str(e)}")
+    return True
 
 
 async def send_password_reset_email(email: str, name: str, code: str) -> bool:
     """Send password reset code"""
     logger.info(f"Sending password reset email to {email}")
 
-    try:
-        html_content = create_email_template(
-            title="Password Reset",
-            name=name,
-            code=code,
-            expiry_minutes=settings.PASSWORD_RESET_EXPIRY,
-            action_type="password_reset"
-        )
+    html_content = create_email_template(
+        title="Password Reset",
+        name=name,
+        code=code,
+        expiry_minutes=settings.PASSWORD_RESET_EXPIRY,
+        action_type="password_reset"
+    )
 
-        success = await send_email_with_retry(
-            to_email=email,
-            subject=f"{settings.APP_NAME} - Password Reset Code",
-            html_content=html_content
-        )
+    success = await send_email_with_retry(
+        to_email=email,
+        subject=f"{settings.APP_NAME} - Password Reset Code",
+        html_content=html_content
+    )
 
-        if not success:
-            raise Exception("Failed to send password reset email after retries.")
+    if not success:
+        raise Exception("Failed to send password reset email. Please try again later.")
 
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to send password reset email to {email}: {str(e)}")
-        raise Exception(f"Failed to send password reset email: {str(e)}")
+    return True
 
 
 # Email testing function
