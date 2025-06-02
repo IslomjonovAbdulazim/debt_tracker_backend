@@ -421,3 +421,4 @@ async def test_email_configuration() -> list:
 def reset_email_rate_limit(email: str):
     """Reset rate limit for an email address"""
     EmailRateLimiter.reset_rate_limit(email)
+
