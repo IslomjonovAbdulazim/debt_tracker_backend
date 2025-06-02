@@ -316,48 +316,58 @@ async def send_verification_email(email: str, name: str, code: str) -> bool:
     """Send email verification code"""
     logger.info(f"Sending verification email to {email}")
 
-    html_content = create_email_template(
-        title="Email Verification",
-        name=name,
-        code=code,
-        expiry_minutes=settings.EMAIL_VERIFICATION_EXPIRY,
-        action_type="verification"
-    )
+    try:
+        html_content = create_email_template(
+            title="Email Verification",
+            name=name,
+            code=code,
+            expiry_minutes=settings.EMAIL_VERIFICATION_EXPIRY,
+            action_type="verification"
+        )
 
-    success = await send_email_with_retry(
-        to_email=email,
-        subject=f"{settings.APP_NAME} - Email Verification Code",
-        html_content=html_content
-    )
+        success = await send_email_with_retry(
+            to_email=email,
+            subject=f"{settings.APP_NAME} - Email Verification Code",
+            html_content=html_content
+        )
 
-    if not success:
-        raise Exception("Failed to send verification email. Please try again later.")
+        if not success:
+            raise Exception("Failed to send verification email after retries.")
 
-    return True
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send verification email to {email}: {str(e)}")
+        raise Exception(f"Failed to send verification email: {str(e)}")
 
 
 async def send_password_reset_email(email: str, name: str, code: str) -> bool:
     """Send password reset code"""
     logger.info(f"Sending password reset email to {email}")
 
-    html_content = create_email_template(
-        title="Password Reset",
-        name=name,
-        code=code,
-        expiry_minutes=settings.PASSWORD_RESET_EXPIRY,
-        action_type="password_reset"
-    )
+    try:
+        html_content = create_email_template(
+            title="Password Reset",
+            name=name,
+            code=code,
+            expiry_minutes=settings.PASSWORD_RESET_EXPIRY,
+            action_type="password_reset"
+        )
 
-    success = await send_email_with_retry(
-        to_email=email,
-        subject=f"{settings.APP_NAME} - Password Reset Code",
-        html_content=html_content
-    )
+        success = await send_email_with_retry(
+            to_email=email,
+            subject=f"{settings.APP_NAME} - Password Reset Code",
+            html_content=html_content
+        )
 
-    if not success:
-        raise Exception("Failed to send password reset email. Please try again later.")
+        if not success:
+            raise Exception("Failed to send password reset email after retries.")
 
-    return True
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send password reset email to {email}: {str(e)}")
+        raise Exception(f"Failed to send password reset email: {str(e)}")
 
 
 # Email testing function
