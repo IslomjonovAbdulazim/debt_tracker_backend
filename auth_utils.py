@@ -13,20 +13,10 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
-# Email configuration - choose ONE method
-EMAIL_SERVICE = os.getenv("EMAIL_SERVICE", "gmail")  # Options: gmail, sendgrid, mailgun
-
-# Gmail settings (easiest to start with)
+# Email configuration
+EMAIL_SERVICE = os.getenv("EMAIL_SERVICE", "test")  # Options: gmail, test
 GMAIL_USER = os.getenv("GMAIL_USER", "")
-GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD", "")  # Use app password
-
-# SendGrid settings (recommended for production)
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
-
-# Mailgun settings (also good for production)
-MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY", "")
-MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN", "")
-
+GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD", "")
 APP_NAME = os.getenv("APP_NAME", "Simple Debt Tracker")
 
 # Password hashing
@@ -85,18 +75,19 @@ def create_email_template(name: str, code: str, action: str = "verify") -> str:
     action_text = "verify your email" if action == "verify" else "reset your password"
 
     return f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">Welcome to {APP_NAME}!</h2>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #333; text-align: center;">Welcome to {APP_NAME}!</h2>
         <p>Hi {name},</p>
         <p>Your verification code to {action_text} is:</p>
         <div style="font-size: 32px; font-weight: bold; color: #007bff; text-align: center; 
-                    padding: 20px; background: #f8f9fa; border-radius: 8px; margin: 20px 0;">
+                    padding: 20px; background: #f8f9fa; border-radius: 8px; margin: 20px 0;
+                    border: 2px solid #007bff;">
             {code}
         </div>
-        <p><strong>This code expires in 10 minutes.</strong></p>
-        <p>If you didn't request this, please ignore this email.</p>
-        <hr>
-        <p style="color: #666; font-size: 12px;">© 2025 {APP_NAME}</p>
+        <p style="text-align: center;"><strong>This code expires in 10 minutes.</strong></p>
+        <p style="color: #666;">If you didn't request this, please ignore this email.</p>
+        <hr style="margin: 20px 0;">
+        <p style="color: #666; font-size: 12px; text-align: center;">© 2025 {APP_NAME}</p>
     </div>
     """
 
@@ -105,17 +96,20 @@ def send_email_gmail(to_email: str, subject: str, body: str) -> bool:
     """Send email using Gmail SMTP"""
     try:
         if not GMAIL_USER or not GMAIL_PASSWORD:
-            print(f"Gmail not configured. Would send: {subject}")
+            print(f"❌ Gmail credentials not configured")
             return False
 
+        # Create message
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = GMAIL_USER
         msg['To'] = to_email
 
-        html_part = MIMEText(body, 'html')
+        # Add HTML content
+        html_part = MIMEText(body, 'html', 'utf-8')
         msg.attach(html_part)
 
+        # Send email
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
             server.starttls()
             server.login(GMAIL_USER, GMAIL_PASSWORD)
@@ -124,81 +118,42 @@ def send_email_gmail(to_email: str, subject: str, body: str) -> bool:
         print(f"✅ Email sent successfully to {to_email}")
         return True
 
+    except smtplib.SMTPAuthenticationError:
+        print(f"❌ Gmail authentication failed. Check your app password.")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"❌ Gmail SMTP error: {e}")
+        return False
     except Exception as e:
         print(f"❌ Gmail error: {e}")
         return False
 
 
-def send_email_sendgrid(to_email: str, subject: str, body: str) -> bool:
-    """Send email using SendGrid API"""
-    try:
-        import sendgrid
-        from sendgrid.helpers.mail import Mail
-
-        if not SENDGRID_API_KEY:
-            print("SendGrid not configured")
-            return False
-
-        sg = sendgrid.SendGridAPIClient(api_key=SENDGRID_API_KEY)
-        message = Mail(
-            from_email=f"noreply@yourapp.com",
-            to_emails=to_email,
-            subject=subject,
-            html_content=body
-        )
-        response = sg.send(message)
-
-        print(f"✅ SendGrid email sent to {to_email}")
-        return response.status_code == 202
-
-    except Exception as e:
-        print(f"❌ SendGrid error: {e}")
-        return False
+def send_email_test(to_email: str, subject: str, body: str) -> bool:
+    """Test email - just print to console"""
+    print(f"\n📧 TEST EMAIL")
+    print(f"📧 TO: {to_email}")
+    print(f"📧 SUBJECT: {subject}")
+    print(f"📧 CODE: {extract_code_from_body(body)}")
+    print(f"📧 Full body logged to console\n")
+    return True
 
 
-def send_email_mailgun(to_email: str, subject: str, body: str) -> bool:
-    """Send email using Mailgun API"""
-    try:
-        import requests
-
-        if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
-            print("Mailgun not configured")
-            return False
-
-        response = requests.post(
-            f"https://api.mailgun.net/v3/{MAILGUN_DOMAIN}/messages",
-            auth=("api", MAILGUN_API_KEY),
-            data={
-                "from": f"{APP_NAME} <noreply@{MAILGUN_DOMAIN}>",
-                "to": to_email,
-                "subject": subject,
-                "html": body
-            }
-        )
-
-        print(f"✅ Mailgun email sent to {to_email}")
-        return response.status_code == 200
-
-    except Exception as e:
-        print(f"❌ Mailgun error: {e}")
-        return False
+def extract_code_from_body(body: str) -> str:
+    """Extract verification code from email body for testing"""
+    import re
+    # Look for 6 digits in the email body
+    match = re.search(r'\b\d{6}\b', body)
+    return match.group() if match else "CODE_NOT_FOUND"
 
 
 def send_email(to_email: str, subject: str, body: str) -> bool:
     """Send email using configured service"""
-
-    if EMAIL_SERVICE == "sendgrid":
-        return send_email_sendgrid(to_email, subject, body)
-    elif EMAIL_SERVICE == "mailgun":
-        return send_email_mailgun(to_email, subject, body)
-    elif EMAIL_SERVICE == "gmail":
+    if EMAIL_SERVICE == "gmail":
         return send_email_gmail(to_email, subject, body)
     else:
-        # For testing - just print the email
-        print(f"\n📧 EMAIL TO: {to_email}")
-        print(f"📧 SUBJECT: {subject}")
-        print(f"📧 BODY: {body}\n")
-        return True  # Return True for testing
+        # Default to test mode
+        return send_email_test(to_email, subject, body)
 
 
 def send_verification_email(email: str, name: str, code: str) -> dict:
@@ -208,11 +163,16 @@ def send_verification_email(email: str, name: str, code: str) -> dict:
 
     success = send_email(email, subject, body)
 
-    return {
+    result = {
         "email_sent": success,
-        "message": "Verification email sent" if success else "Email service unavailable",
-        "code": code if not success else None  # Show code if email failed
+        "message": "Verification email sent" if success else "Email service unavailable"
     }
+
+    # In test mode or if email failed, include the code in response
+    if EMAIL_SERVICE == "test" or not success:
+        result["code"] = code
+
+    return result
 
 
 def send_password_reset_email(email: str, name: str, code: str) -> dict:
@@ -222,8 +182,13 @@ def send_password_reset_email(email: str, name: str, code: str) -> dict:
 
     success = send_email(email, subject, body)
 
-    return {
+    result = {
         "email_sent": success,
-        "message": "Reset email sent" if success else "Email service unavailable",
-        "code": code if not success else None  # Show code if email failed
+        "message": "Reset email sent" if success else "Email service unavailable"
     }
+
+    # In test mode or if email failed, include the code in response
+    if EMAIL_SERVICE == "test" or not success:
+        result["code"] = code
+
+    return result
