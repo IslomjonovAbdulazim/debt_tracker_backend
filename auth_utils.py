@@ -14,7 +14,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 7
 
 # Email configuration
-EMAIL_SERVICE = os.getenv("EMAIL_SERVICE", "test")  # Options: gmail, test
+EMAIL_SERVICE = os.getenv("EMAIL_SERVICE", "gmail")  # Default to gmail for production
 GMAIL_USER = os.getenv("GMAIL_USER", "")
 GMAIL_PASSWORD = os.getenv("GMAIL_PASSWORD", "")
 APP_NAME = os.getenv("APP_NAME", "Simple Debt Tracker")
@@ -118,8 +118,8 @@ def send_email_gmail(to_email: str, subject: str, body: str) -> bool:
         print(f"✅ Email sent successfully to {to_email}")
         return True
 
-    except smtplib.SMTPAuthenticationError:
-        print(f"❌ Gmail authentication failed. Check your app password.")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"❌ Gmail authentication failed: {e}")
         return False
     except smtplib.SMTPException as e:
         print(f"❌ Gmail SMTP error: {e}")
@@ -129,50 +129,17 @@ def send_email_gmail(to_email: str, subject: str, body: str) -> bool:
         return False
 
 
-def send_email_test(to_email: str, subject: str, body: str) -> bool:
-    """Test email - just print to console"""
-    print(f"\n📧 TEST EMAIL")
-    print(f"📧 TO: {to_email}")
-    print(f"📧 SUBJECT: {subject}")
-    print(f"📧 CODE: {extract_code_from_body(body)}")
-    print(f"📧 Full body logged to console\n")
-    return True
-
-
-def extract_code_from_body(body: str) -> str:
-    """Extract verification code from email body for testing"""
-    import re
-    # Look for 6 digits in the email body
-    match = re.search(r'\b\d{6}\b', body)
-    return match.group() if match else "CODE_NOT_FOUND"
-
-
-def send_email(to_email: str, subject: str, body: str) -> bool:
-    """Send email using configured service"""
-    if EMAIL_SERVICE == "gmail":
-        return send_email_gmail(to_email, subject, body)
-    else:
-        # Default to test mode
-        return send_email_test(to_email, subject, body)
-
-
 def send_verification_email(email: str, name: str, code: str) -> dict:
     """Send verification email"""
     subject = f"{APP_NAME} - Email Verification"
     body = create_email_template(name, code, "verify")
 
-    success = send_email(email, subject, body)
+    success = send_email_gmail(email, subject, body)
 
-    result = {
+    return {
         "email_sent": success,
-        "message": "Verification email sent" if success else "Email service unavailable"
+        "message": "Verification email sent to your email address" if success else "Failed to send verification email"
     }
-
-    # In test mode or if email failed, include the code in response
-    if EMAIL_SERVICE == "test" or not success:
-        result["code"] = code
-
-    return result
 
 
 def send_password_reset_email(email: str, name: str, code: str) -> dict:
@@ -180,15 +147,9 @@ def send_password_reset_email(email: str, name: str, code: str) -> dict:
     subject = f"{APP_NAME} - Password Reset"
     body = create_email_template(name, code, "reset")
 
-    success = send_email(email, subject, body)
+    success = send_email_gmail(email, subject, body)
 
-    result = {
+    return {
         "email_sent": success,
-        "message": "Reset email sent" if success else "Email service unavailable"
+        "message": "Password reset email sent to your email address" if success else "Failed to send reset email"
     }
-
-    # In test mode or if email failed, include the code in response
-    if EMAIL_SERVICE == "test" or not success:
-        result["code"] = code
-
-    return result

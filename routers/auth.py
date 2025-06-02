@@ -82,12 +82,11 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
 
     return {
         "success": True,
-        "message": "User registered successfully",
+        "message": "User registered successfully. Please check your email for verification code.",
         "data": {
             "user_id": user.id,
             "email": user.email,
-            "email_sent": email_result["email_sent"],
-            "verification_code": email_result.get("code")  # Only if email failed
+            "email_sent": email_result["email_sent"]
         }
     }
 
@@ -208,11 +207,10 @@ def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
 
     return {
         "success": True,
-        "message": "Password reset code sent",
+        "message": "Password reset code sent to your email address",
         "data": {
             "email": forgot_data.email,
-            "email_sent": email_result["email_sent"],
-            "reset_code": email_result.get("code")  # Only if email failed
+            "email_sent": email_result["email_sent"]
         }
     }
 
@@ -286,10 +284,9 @@ def resend_verification_code(email_data: ForgotPassword, db: Session = Depends(g
 
     return {
         "success": True,
-        "message": "Verification code resent",
+        "message": "Verification code resent to your email address",
         "data": {
             "email": email_data.email,
-            "email_sent": email_result["email_sent"],
-            "verification_code": email_result.get("code")  # Only if email failed
+            "email_sent": email_result["email_sent"]
         }
     }
