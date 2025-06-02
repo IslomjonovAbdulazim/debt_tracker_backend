@@ -1,21 +1,23 @@
-# Updated auth.py with automatic fallback system (try option 1, if fail try option 2, etc.)
+# Improved auth.py with best practices for OTP email sending
 
 import random
 import string
+import asyncio
+import smtplib
+import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formataddr
+import ssl
+import logging
+
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi import Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from sqlalchemy.orm import Session
-import logging
-import os
-import asyncio
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 from app.config import settings
 from app.database import get_db, User
@@ -35,164 +37,228 @@ ACCESS_TOKEN_EXPIRE_DAYS = 7
 # Security scheme
 security = HTTPBearer()
 
+# Rate limiting storage (in production, use Redis)
+email_rate_limit: Dict[str, Dict[str, Any]] = {}
 
-async def send_email_auto_fallback(subject: str, recipient: str, html_content: str):
-    """
-    Automatic fallback email system:
-    Option 1: Gmail TLS port 587 (most common)
-    Option 2: Gmail SSL port 465 (when 587 is blocked)
-    Option 3: Gmail port 25 (backup)
-    Option 4: Direct SMTP fallback
-    Option 5: Log only (if all fail)
-    """
+# Email configuration constants
+GMAIL_SMTP_SERVER = "smtp.gmail.com"
+GMAIL_SMTP_PORT = 587  # Use 587 for TLS (most reliable)
+EMAIL_TIMEOUT = 30  # Increased timeout for server environments
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
 
-    # Check if we should skip email entirely
-    if os.getenv("SKIP_EMAIL_SEND", "False").lower() == "true":
-        logger.warning(f"SKIP_EMAIL_SEND is True. Email skipped for {recipient}")
+
+class EmailRateLimiter:
+    """Simple rate limiter for email sending"""
+
+    @staticmethod
+    def is_rate_limited(email: str, limit: int = 3, window: int = 300) -> bool:
+        """Check if email is rate limited (default: 3 emails per 5 minutes)"""
+        now = time.time()
+
+        if email not in email_rate_limit:
+            email_rate_limit[email] = {"count": 0, "window_start": now}
+            return False
+
+        rate_data = email_rate_limit[email]
+
+        # Reset window if expired
+        if now - rate_data["window_start"] > window:
+            rate_data["count"] = 0
+            rate_data["window_start"] = now
+
+        # Check if limit exceeded
+        if rate_data["count"] >= limit:
+            return True
+
+        rate_data["count"] += 1
+        return False
+
+    @staticmethod
+    def reset_rate_limit(email: str):
+        """Reset rate limit for email (useful after successful verification)"""
+        if email in email_rate_limit:
+            del email_rate_limit[email]
+
+
+async def send_email_with_retry(
+        to_email: str,
+        subject: str,
+        html_content: str,
+        max_retries: int = MAX_RETRIES
+) -> bool:
+    """
+    Send email with retry mechanism and exponential backoff
+    """
+    # Check if email sending is disabled
+    if getattr(settings, 'SKIP_EMAIL_SEND', False):
+        logger.warning(f"Email sending disabled. Would send: {subject} to {to_email}")
         return True
 
-    # If no credentials, skip to logging
-    if not settings.MAIL_USERNAME or not settings.MAIL_PASSWORD:
-        logger.warning(f"No email credentials. Email content logged for {recipient}")
-        logger.info(f"Subject: {subject}")
-        logger.info(f"Content: {html_content}")
-        return True
+    # Validate email configuration
+    if not all([settings.MAIL_USERNAME, settings.MAIL_PASSWORD, settings.MAIL_FROM]):
+        logger.error("Email configuration incomplete")
+        if settings.DEBUG:
+            logger.info(f"DEBUG MODE - Email content for {to_email}:")
+            logger.info(f"Subject: {subject}")
+            logger.info(f"Content: {html_content}")
+        return False
 
-    # Define email options in order of preference
-    email_options = [
-        # Option 1: Standard Gmail TLS (most reliable)
-        {
-            "name": "Gmail TLS 587",
-            "method": "fastmail",
-            "config": {
-                "MAIL_PORT": 587,
-                "MAIL_SERVER": "smtp.gmail.com",
-                "MAIL_STARTTLS": True,
-                "MAIL_SSL_TLS": False,
-                "timeout": 10
-            }
-        },
-        # Option 2: Gmail SSL (when TLS is blocked)
-        {
-            "name": "Gmail SSL 465",
-            "method": "fastmail",
-            "config": {
-                "MAIL_PORT": 465,
-                "MAIL_SERVER": "smtp.gmail.com",
-                "MAIL_STARTTLS": False,
-                "MAIL_SSL_TLS": True,
-                "timeout": 10
-            }
-        },
-        # Option 3: Alternative port (some servers use this)
-        {
-            "name": "Gmail Port 25",
-            "method": "fastmail",
-            "config": {
-                "MAIL_PORT": 25,
-                "MAIL_SERVER": "smtp.gmail.com",
-                "MAIL_STARTTLS": True,
-                "MAIL_SSL_TLS": False,
-                "timeout": 10
-            }
-        },
-        # Option 4: Direct SMTP TLS
-        {
-            "name": "Direct SMTP TLS",
-            "method": "direct_smtp",
-            "config": {"host": "smtp.gmail.com", "port": 587, "use_tls": True}
-        },
-        # Option 5: Direct SMTP SSL
-        {
-            "name": "Direct SMTP SSL",
-            "method": "direct_smtp",
-            "config": {"host": "smtp.gmail.com", "port": 465, "use_ssl": True}
-        }
-    ]
+    # Check rate limiting
+    if EmailRateLimiter.is_rate_limited(to_email):
+        logger.warning(f"Rate limit exceeded for {to_email}")
+        raise Exception("Too many email requests. Please wait before requesting again.")
 
-    # Try each option until one works
-    for i, option in enumerate(email_options, 1):
+    last_error = None
+
+    for attempt in range(max_retries):
         try:
-            logger.info(f"Trying Option {i}: {option['name']}")
+            logger.info(f"Sending email to {to_email} (attempt {attempt + 1}/{max_retries})")
 
-            if option["method"] == "fastmail":
-                success = await try_fastmail(option, subject, recipient, html_content)
-            else:
-                success = await try_direct_smtp(option, subject, recipient, html_content)
+            # Create email message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = formataddr((settings.APP_NAME, settings.MAIL_FROM))
+            msg['To'] = to_email
 
-            if success:
-                logger.info(f"✅ Email sent successfully using Option {i}: {option['name']}")
-                return True
+            # Add HTML content
+            html_part = MIMEText(html_content, 'html', 'utf-8')
+            msg.attach(html_part)
+
+            # Create SSL context with proper security
+            context = ssl.create_default_context()
+
+            # Connect and send email
+            with smtplib.SMTP(GMAIL_SMTP_SERVER, GMAIL_SMTP_PORT, timeout=EMAIL_TIMEOUT) as server:
+                server.starttls(context=context)
+                server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
+
+                # Send email
+                result = server.send_message(msg)
+
+                if not result:  # Empty dict means success
+                    logger.info(f"✅ Email sent successfully to {to_email}")
+                    return True
+                else:
+                    logger.warning(f"Partial send failure: {result}")
+
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"SMTP Authentication failed: {e}")
+            raise Exception("Email authentication failed. Please check your email credentials.")
+
+        except smtplib.SMTPRecipientsRefused as e:
+            logger.error(f"Recipient refused: {e}")
+            raise Exception("Invalid recipient email address.")
+
+        except smtplib.SMTPServerDisconnected as e:
+            logger.warning(f"SMTP server disconnected: {e}")
+            last_error = e
+
+        except smtplib.SMTPConnectError as e:
+            logger.warning(f"SMTP connection error: {e}")
+            last_error = e
 
         except Exception as e:
-            logger.warning(f"❌ Option {i} ({option['name']}) failed: {str(e)}")
-            continue
+            logger.warning(f"Email attempt {attempt + 1} failed: {str(e)}")
+            last_error = e
 
-    # If all options fail, log the content for debugging
-    logger.error("❌ All email sending options failed!")
+        # Wait before retry (exponential backoff)
+        if attempt < max_retries - 1:
+            wait_time = RETRY_DELAY * (2 ** attempt)  # 2, 4, 8 seconds
+            logger.info(f"Waiting {wait_time} seconds before retry...")
+            await asyncio.sleep(wait_time)
+
+    # All attempts failed
+    logger.error(f"❌ Failed to send email to {to_email} after {max_retries} attempts")
+    logger.error(f"Last error: {last_error}")
+
     if settings.DEBUG:
-        logger.info(f"DEBUG MODE - Email content for {recipient}:")
+        logger.info(f"DEBUG MODE - Email content for {to_email}:")
         logger.info(f"Subject: {subject}")
-        logger.info(f"HTML Content: {html_content}")
+        logger.info(f"Content: {html_content}")
 
     return False
 
 
-async def try_fastmail(option, subject: str, recipient: str, html_content: str):
-    """Try sending email using FastMail with specific configuration"""
-    config = ConnectionConfig(
-        MAIL_USERNAME=settings.MAIL_USERNAME,
-        MAIL_PASSWORD=settings.MAIL_PASSWORD,
-        MAIL_FROM=settings.MAIL_FROM,
-        MAIL_PORT=option["config"]["MAIL_PORT"],
-        MAIL_SERVER=option["config"]["MAIL_SERVER"],
-        MAIL_STARTTLS=option["config"]["MAIL_STARTTLS"],
-        MAIL_SSL_TLS=option["config"]["MAIL_SSL_TLS"],
-        USE_CREDENTIALS=True,
-        VALIDATE_CERTS=False,
-        MAIL_FROM_NAME=settings.APP_NAME,
-        TIMEOUT=option["config"]["timeout"]
-    )
+def create_email_template(
+        title: str,
+        name: str,
+        code: str,
+        expiry_minutes: int,
+        action_type: str = "verification"
+) -> str:
+    """
+    Create standardized email template for OTP codes
+    """
+    action_text = {
+        "verification": "verify your email",
+        "password_reset": "reset your password"
+    }
 
-    fastmail = FastMail(config)
-    message = MessageSchema(
-        subject=subject,
-        recipients=[recipient],
-        body=html_content,
-        subtype=MessageType.html
-    )
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{title}</title>
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f4f4f4; font-family: Arial, sans-serif;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 0;">
+            <!-- Header -->
+            <div style="background-color: #007bff; color: white; padding: 20px; text-align: center;">
+                <h1 style="margin: 0; font-size: 24px;">{settings.APP_NAME}</h1>
+            </div>
 
-    # Send with timeout
-    await asyncio.wait_for(fastmail.send_message(message), timeout=15.0)
-    return True
+            <!-- Content -->
+            <div style="padding: 30px;">
+                <h2 style="color: #333; margin-top: 0;">{title}</h2>
+                <p style="color: #555; font-size: 16px; line-height: 1.5;">Hello {name},</p>
+                <p style="color: #555; font-size: 16px; line-height: 1.5;">
+                    We received a request to {action_text.get(action_type, action_type)} for your account.
+                </p>
+                <p style="color: #555; font-size: 16px; line-height: 1.5;">Your verification code is:</p>
 
+                <!-- OTP Code Box -->
+                <div style="background-color: #f8f9fa; border: 2px solid #007bff; border-radius: 8px; padding: 20px; text-align: center; margin: 25px 0;">
+                    <div style="font-size: 32px; font-weight: bold; color: #007bff; letter-spacing: 4px; font-family: 'Courier New', monospace;">
+                        {code}
+                    </div>
+                </div>
 
-async def try_direct_smtp(option, subject: str, recipient: str, html_content: str):
-    """Try sending email using direct SMTP"""
-    config = option["config"]
+                <!-- Important Info -->
+                <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; padding: 15px; margin: 20px 0;">
+                    <p style="margin: 0; color: #856404; font-size: 14px;">
+                        <strong>⚠️ Important:</strong><br>
+                        • This code expires in <strong>{expiry_minutes} minutes</strong><br>
+                        • Enter this code exactly as shown<br>
+                        • If you didn't request this, please ignore this email
+                    </p>
+                </div>
 
-    # Create message
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = settings.MAIL_FROM or settings.MAIL_USERNAME
-    msg['To'] = recipient
+                <p style="color: #555; font-size: 16px; line-height: 1.5;">
+                    If you have any questions, please contact our support team.
+                </p>
 
-    # Add HTML part
-    html_part = MIMEText(html_content, 'html')
-    msg.attach(html_part)
+                <p style="color: #555; font-size: 16px; line-height: 1.5;">
+                    Best regards,<br>
+                    <strong>{settings.APP_NAME} Team</strong>
+                </p>
+            </div>
 
-    # Connect and send
-    if config.get("use_ssl"):
-        server = smtplib.SMTP_SSL(config['host'], config['port'], timeout=10)
-    else:
-        server = smtplib.SMTP(config['host'], config['port'], timeout=10)
-        if config.get("use_tls"):
-            server.starttls()
-
-    server.login(settings.MAIL_USERNAME, settings.MAIL_PASSWORD)
-    server.send_message(msg)
-    server.quit()
-    return True
+            <!-- Footer -->
+            <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-top: 1px solid #dee2e6;">
+                <p style="margin: 0; color: #6c757d; font-size: 12px;">
+                    This is an automated message, please do not reply to this email.
+                </p>
+                <p style="margin: 5px 0 0 0; color: #6c757d; font-size: 12px;">
+                    © 2025 {settings.APP_NAME}. All rights reserved.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
 
 # Password functions
@@ -205,6 +271,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def generate_code() -> str:
+    """Generate a secure 6-digit OTP code"""
     return ''.join(random.choices(string.digits, k=6))
 
 
@@ -244,91 +311,89 @@ def get_current_user(
     return user
 
 
-# Simplified email functions
-async def send_verification_email(email: str, name: str, code: str):
-    """Send email verification code with automatic fallback"""
+# Email sending functions
+async def send_verification_email(email: str, name: str, code: str) -> bool:
+    """Send email verification code"""
     logger.info(f"Sending verification email to {email}")
 
-    html_content = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">Email Verification</h2>
-        <p>Hello {name},</p>
-        <p>Your verification code is:</p>
-        <div style="background: #f0f0f0; padding: 20px; text-align: center; font-size: 24px; font-weight: bold; margin: 20px 0;">
-            {code}
-        </div>
-        <p>This code expires in 10 minutes.</p>
-        <p>If you didn't request this, please ignore this email.</p>
-        <p>Best regards,<br>{settings.APP_NAME}</p>
-    </div>
-    """
+    html_content = create_email_template(
+        title="Email Verification",
+        name=name,
+        code=code,
+        expiry_minutes=settings.EMAIL_VERIFICATION_EXPIRY,
+        action_type="verification"
+    )
 
-    success = await send_email_auto_fallback(
-        subject=f"{settings.APP_NAME} - Email Verification",
-        recipient=email,
+    success = await send_email_with_retry(
+        to_email=email,
+        subject=f"{settings.APP_NAME} - Email Verification Code",
         html_content=html_content
     )
 
     if not success:
-        logger.error(f"Failed to send verification email to {email}")
-        if settings.DEBUG:
-            logger.info(f"DEBUG MODE - Verification code for {email}: {code}")
-        raise Exception("Email sending failed after trying all methods")
+        raise Exception("Failed to send verification email. Please try again later.")
+
+    return True
 
 
-async def send_password_reset_email(email: str, name: str, code: str):
-    """Send password reset code with automatic fallback"""
+async def send_password_reset_email(email: str, name: str, code: str) -> bool:
+    """Send password reset code"""
     logger.info(f"Sending password reset email to {email}")
 
-    html_content = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #333;">Password Reset</h2>
-        <p>Hello {name},</p>
-        <p>Your password reset code is:</p>
-        <div style="background: #f0f0f0; padding: 20px; text-align: center; font-size: 24px; font-weight: bold; margin: 20px 0;">
-            {code}
-        </div>
-        <p>This code expires in 15 minutes.</p>
-        <p>If you didn't request this, please ignore this email.</p>
-        <p>Best regards,<br>{settings.APP_NAME}</p>
-    </div>
-    """
+    html_content = create_email_template(
+        title="Password Reset",
+        name=name,
+        code=code,
+        expiry_minutes=settings.PASSWORD_RESET_EXPIRY,
+        action_type="password_reset"
+    )
 
-    success = await send_email_auto_fallback(
-        subject=f"{settings.APP_NAME} - Password Reset",
-        recipient=email,
+    success = await send_email_with_retry(
+        to_email=email,
+        subject=f"{settings.APP_NAME} - Password Reset Code",
         html_content=html_content
     )
 
     if not success:
-        logger.error(f"Failed to send password reset email to {email}")
-        if settings.DEBUG:
-            logger.info(f"DEBUG MODE - Password reset code for {email}: {code}")
-        raise Exception("Email sending failed after trying all methods")
+        raise Exception("Failed to send password reset email. Please try again later.")
+
+    return True
 
 
-# Test function
-async def test_email_configuration():
-    """Test the automatic fallback email system"""
-    logger.info("Testing automatic email fallback system...")
+# Email testing function
+async def test_email_configuration() -> list:
+    """Test email configuration"""
+    logger.info("Testing email configuration...")
+
+    if not all([settings.MAIL_USERNAME, settings.MAIL_PASSWORD, settings.MAIL_FROM]):
+        return ["❌ Email configuration incomplete. Check MAIL_USERNAME, MAIL_PASSWORD, and MAIL_FROM."]
 
     try:
-        success = await send_email_auto_fallback(
-            subject="Test Email - Auto Fallback System",
-            recipient=settings.MAIL_USERNAME,  # Send to self
-            html_content="""
-            <div style="font-family: Arial, sans-serif;">
-                <h2>✅ Email Test Successful!</h2>
-                <p>This email was sent using the automatic fallback system.</p>
-                <p>Your email configuration is working correctly!</p>
-            </div>
-            """
+        test_code = generate_code()
+        html_content = create_email_template(
+            title="Email Configuration Test",
+            name="Test User",
+            code=test_code,
+            expiry_minutes=10,
+            action_type="verification"
+        )
+
+        success = await send_email_with_retry(
+            to_email=settings.MAIL_USERNAME,  # Send test to self
+            subject=f"{settings.APP_NAME} - Email Test",
+            html_content=html_content
         )
 
         if success:
-            return ["✅ Auto-fallback email system is working!"]
+            return ["✅ Email configuration test successful!"]
         else:
-            return ["❌ All email methods failed in auto-fallback system"]
+            return ["❌ Email test failed. Check your configuration and network."]
 
     except Exception as e:
-        return [f"❌ Email test failed: {str(e)}"]
+        return [f"❌ Email test error: {str(e)}"]
+
+
+# Utility function to reset rate limits (useful for successful verifications)
+def reset_email_rate_limit(email: str):
+    """Reset rate limit for an email address"""
+    EmailRateLimiter.reset_rate_limit(email)

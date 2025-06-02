@@ -98,7 +98,8 @@ def read_root():
             "version": settings.APP_VERSION,
             "docs": "/docs",
             "status": "healthy",
-            "debug_mode": settings.DEBUG
+            "debug_mode": settings.DEBUG,
+            "environment": settings.SERVER_ENVIRONMENT
         }
     )
 
@@ -109,11 +110,51 @@ def health_check():
     return success_response("API is healthy", {
         "database": "connected",
         "email_configured": bool(settings.MAIL_USERNAME and settings.MAIL_PASSWORD),
-        "debug_mode": settings.DEBUG
+        "debug_mode": settings.DEBUG,
+        "environment": settings.SERVER_ENVIRONMENT
     })
 
 
-# Email configuration check (only in debug mode)
+# Enhanced health check with email testing
+@app.get("/health/detailed")
+async def detailed_health_check():
+    """Detailed health check including email service"""
+    from app.auth import test_email_configuration
+
+    health = {
+        "database": "unknown",
+        "email": "unknown",
+        "environment": settings.SERVER_ENVIRONMENT,
+        "debug_mode": settings.DEBUG
+    }
+
+    # Test database
+    try:
+        from app.database import engine
+        with engine.connect() as conn:
+            conn.execute("SELECT 1")
+        health["database"] = "healthy"
+    except Exception as e:
+        health["database"] = "unhealthy"
+        health["database_error"] = str(e)
+
+    # Test email configuration
+    try:
+        if settings.MAIL_USERNAME and settings.MAIL_PASSWORD:
+            email_results = await test_email_configuration()
+            health["email"] = "healthy" if "✅" in str(email_results) else "unhealthy"
+            health["email_details"] = email_results
+        else:
+            health["email"] = "not_configured"
+            health["email_details"] = ["Email credentials not provided"]
+    except Exception as e:
+        health["email"] = "unhealthy"
+        health["email_error"] = str(e)
+
+    return success_response("Detailed health check completed", health)
+
+
+# Email testing endpoints (only in debug mode)
 if settings.DEBUG:
     @app.get("/debug/email-config")
     def check_email_config():
@@ -123,5 +164,94 @@ if settings.DEBUG:
             "mail_password_set": bool(settings.MAIL_PASSWORD),
             "mail_from_set": bool(settings.MAIL_FROM),
             "mail_username": settings.MAIL_USERNAME if settings.MAIL_USERNAME else "NOT SET",
+            "skip_email_send": settings.SKIP_EMAIL_SEND,
+            "rate_limit": settings.EMAIL_RATE_LIMIT,
+            "rate_window": settings.EMAIL_RATE_WINDOW,
+            "verification_expiry": settings.EMAIL_VERIFICATION_EXPIRY,
+            "password_reset_expiry": settings.PASSWORD_RESET_EXPIRY,
             "warning": "Make sure you're using an app-specific password for Gmail, not your regular password!"
         })
+
+
+    @app.get("/debug/test-email")
+    async def test_email_sending():
+        """Debug endpoint to test email sending"""
+        from app.auth import test_email_configuration
+
+        try:
+            results = await test_email_configuration()
+            return success_response("Email test completed", {
+                "results": results,
+                "note": "Check your email inbox for the test message"
+            })
+        except Exception as e:
+            return success_response("Email test failed", {
+                "error": str(e),
+                "suggestion": "Check your email configuration and network connectivity"
+            })
+
+
+    @app.get("/debug/test-rate-limit")
+    async def test_rate_limit():
+        """Test rate limiting functionality"""
+        from app.auth import EmailRateLimiter
+
+        email = "test@example.com"
+        results = []
+
+        for i in range(5):
+            limited = EmailRateLimiter.is_rate_limited(email)
+            results.append(f"Request {i + 1}: {'BLOCKED' if limited else 'ALLOWED'}")
+
+        # Reset for next test
+        EmailRateLimiter.reset_rate_limit(email)
+
+        return success_response("Rate limit test completed", {
+            "results": results,
+            "note": "First 3 requests should be ALLOWED, rest should be BLOCKED"
+        })
+
+
+    @app.post("/debug/send-test-otp")
+    async def send_test_otp():
+        """Send a test OTP email to the configured email address"""
+        if not settings.MAIL_USERNAME:
+            return success_response("Test failed", {
+                "error": "MAIL_USERNAME not configured"
+            })
+
+        from app.auth import send_verification_email, generate_code
+
+        try:
+            test_code = generate_code()
+            await send_verification_email(
+                email=settings.MAIL_USERNAME,
+                name="Test User",
+                code=test_code
+            )
+
+            return success_response("Test OTP sent successfully", {
+                "sent_to": settings.MAIL_USERNAME,
+                "test_code": test_code,
+                "note": "Check your email inbox"
+            })
+        except Exception as e:
+            return success_response("Test OTP failed", {
+                "error": str(e),
+                "suggestion": "Check email configuration and server connectivity"
+            })
+
+
+# Email metrics endpoint
+@app.get("/metrics/email")
+async def get_email_metrics():
+    """Get email sending metrics"""
+    # In production, you might want to use a proper metrics system
+    return success_response("Email metrics", {
+        "email_service": "gmail_smtp",
+        "rate_limit_configured": settings.EMAIL_RATE_LIMIT,
+        "rate_window_seconds": settings.EMAIL_RATE_WINDOW,
+        "verification_expiry_minutes": settings.EMAIL_VERIFICATION_EXPIRY,
+        "password_reset_expiry_minutes": settings.PASSWORD_RESET_EXPIRY,
+        "note": "Detailed metrics require proper monitoring setup"
+    })
