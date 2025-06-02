@@ -1,10 +1,28 @@
+# Core FastAPI dependencies
 fastapi==0.115.6
 uvicorn==0.34.2
 python-multipart==0.0.19
+
+# Database
 sqlalchemy==2.0.23
-passlib==1.7.4
-bcrypt==4.0.1
-fastapi-mail==1.4.1
-python-dotenv==1.0.0
+
+# Authentication & Security
+passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
+
+# Data validation
 pydantic[email]==2.5.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Email services (optional - install only what you need)
+# For SendGrid:
+# sendgrid==6.10.0
+
+# For Mailgun:
+# requests==2.31.0
+
+# Note: If you only use Gmail SMTP, you don't need additional packages
+# If using SendGrid: pip install sendgrid
+# If using Mailgun: pip install requests (usually already installed)

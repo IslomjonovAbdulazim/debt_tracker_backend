@@ -1,71 +1,61 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from pydantic import BaseModel
 from typing import List
 
-from app.database import get_db, User, Contact, Debt
-from app.auth import get_current_user
-from app.responses import success_response, error_response
+from database import get_db, User, Contact, Debt
+from models import ContactCreate, ContactUpdate, ContactResponse
+from routers.auth import get_current_user
 
 router = APIRouter()
 
 
-# Pydantic models
-class ContactCreate(BaseModel):
-    name: str
-    phone: str
-
-
-class ContactUpdate(BaseModel):
-    name: str
-    phone: str
-
-
-@router.post("/")
+@router.post("/", response_model=dict)
 def create_contact(
         contact_data: ContactCreate,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Create new contact"""
-    # Check if contact already exists for this user
-    existing = db.query(Contact).filter(
+    """Create a new contact"""
+
+    # Check if contact with this phone already exists for this user
+    existing_contact = db.query(Contact).filter(
         Contact.user_id == current_user.id,
         Contact.phone == contact_data.phone
     ).first()
 
-    if existing:
-        error_response("Contact with this phone already exists", status_code=status.HTTP_400_BAD_REQUEST)
+    if existing_contact:
+        raise HTTPException(status_code=400, detail="Contact with this phone number already exists")
 
-    # Create contact
+    # Create new contact
     contact = Contact(
         name=contact_data.name,
         phone=contact_data.phone,
         user_id=current_user.id
     )
+
     db.add(contact)
     db.commit()
     db.refresh(contact)
 
-    return success_response(
-        "Contact created successfully",
-        {
+    return {
+        "success": True,
+        "message": "Contact created successfully",
+        "data": {
             "id": contact.id,
             "name": contact.name,
             "phone": contact.phone,
             "created_at": contact.created_at.isoformat()
-        },
-        status_code=201
-    )
+        }
+    }
 
 
-@router.get("/")
+@router.get("/", response_model=dict)
 def get_contacts(
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Get all contacts for user with debt summary"""
+    """Get all contacts for the current user"""
+
     contacts = db.query(Contact).filter(Contact.user_id == current_user.id).all()
 
     contact_list = []
@@ -73,6 +63,7 @@ def get_contacts(
         # Calculate debt summary for this contact
         debts = db.query(Debt).filter(Debt.contact_id == contact.id).all()
 
+        # Calculate amounts
         i_owe = sum(debt.amount for debt in debts if debt.is_my_debt and not debt.is_paid)
         they_owe = sum(debt.amount for debt in debts if not debt.is_my_debt and not debt.is_paid)
         total_debts = len([d for d in debts if not d.is_paid])
@@ -90,34 +81,36 @@ def get_contacts(
             }
         })
 
-    return success_response(
-        f"Retrieved {len(contact_list)} contacts",
-        {
+    return {
+        "success": True,
+        "message": f"Retrieved {len(contact_list)} contacts",
+        "data": {
             "contacts": contact_list,
             "total_count": len(contact_list)
         }
-    )
+    }
 
 
-@router.get("/{contact_id}")
+@router.get("/{contact_id}", response_model=dict)
 def get_contact(
         contact_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Get specific contact by ID"""
+    """Get a specific contact by ID"""
+
     contact = db.query(Contact).filter(
         Contact.id == contact_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not contact:
-        error_response("Contact not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Contact not found")
 
     # Get all debts for this contact
     debts = db.query(Debt).filter(Debt.contact_id == contact.id).all()
-    debt_list = []
 
+    debt_list = []
     for debt in debts:
         debt_list.append({
             "id": debt.id,
@@ -128,92 +121,101 @@ def get_contact(
             "created_at": debt.created_at.isoformat()
         })
 
-    return success_response(
-        "Contact retrieved successfully",
-        {
+    return {
+        "success": True,
+        "message": "Contact retrieved successfully",
+        "data": {
             "id": contact.id,
             "name": contact.name,
             "phone": contact.phone,
             "created_at": contact.created_at.isoformat(),
             "debts": debt_list
         }
-    )
+    }
 
 
-@router.put("/{contact_id}")
+@router.put("/{contact_id}", response_model=dict)
 def update_contact(
         contact_id: int,
         contact_data: ContactUpdate,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Update contact"""
+    """Update a contact"""
+
     contact = db.query(Contact).filter(
         Contact.id == contact_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not contact:
-        error_response("Contact not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Contact not found")
 
-    # Check if phone number conflicts with another contact
+    # Check if new phone number conflicts with another contact
     if contact_data.phone != contact.phone:
-        existing = db.query(Contact).filter(
+        existing_contact = db.query(Contact).filter(
             Contact.user_id == current_user.id,
             Contact.phone == contact_data.phone,
             Contact.id != contact_id
         ).first()
 
-        if existing:
-            error_response("Another contact with this phone already exists", status_code=status.HTTP_400_BAD_REQUEST)
+        if existing_contact:
+            raise HTTPException(status_code=400, detail="Another contact with this phone number already exists")
 
     # Update contact
     contact.name = contact_data.name
     contact.phone = contact_data.phone
+
     db.commit()
     db.refresh(contact)
 
-    return success_response(
-        "Contact updated successfully",
-        {
+    return {
+        "success": True,
+        "message": "Contact updated successfully",
+        "data": {
             "id": contact.id,
             "name": contact.name,
             "phone": contact.phone,
             "created_at": contact.created_at.isoformat()
         }
-    )
+    }
 
 
-@router.delete("/{contact_id}")
+@router.delete("/{contact_id}", response_model=dict)
 def delete_contact(
         contact_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Delete contact and all associated debts"""
+    """Delete a contact and all associated debts"""
+
     contact = db.query(Contact).filter(
         Contact.id == contact_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not contact:
-        error_response("Contact not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Contact not found")
 
     # Count debts that will be deleted
     debt_count = db.query(Debt).filter(Debt.contact_id == contact.id).count()
+
+    # Store contact info before deletion
+    contact_info = {
+        "id": contact.id,
+        "name": contact.name,
+        "phone": contact.phone
+    }
 
     # Delete contact (debts will be cascade deleted)
     db.delete(contact)
     db.commit()
 
-    return success_response(
-        "Contact deleted successfully",
-        {
-            "deleted_contact": {
-                "id": contact.id,
-                "name": contact.name,
-                "phone": contact.phone
-            },
+    return {
+        "success": True,
+        "message": "Contact deleted successfully",
+        "data": {
+            "deleted_contact": contact_info,
             "deleted_debts_count": debt_count
         }
-    )
+    }

@@ -1,38 +1,22 @@
-from fastapi import APIRouter, Depends, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
-from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 
-from app.database import get_db, User, Contact, Debt
-from app.auth import get_current_user
-from app.responses import success_response, error_response
+from database import get_db, User, Contact, Debt
+from models import DebtCreate, DebtUpdate, DebtResponse
+from routers.auth import get_current_user
 
 router = APIRouter()
 
 
-# Pydantic models
-class DebtCreate(BaseModel):
-    contact_id: int
-    amount: float
-    description: str
-    is_my_debt: bool  # True = I owe them, False = they owe me
-
-
-class DebtUpdate(BaseModel):
-    amount: float
-    description: str
-    is_paid: bool
-    is_my_debt: bool
-
-
-@router.post("/")
+@router.post("/", response_model=dict)
 def create_debt(
         debt_data: DebtCreate,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
-    """Create new debt"""
+    """Create a new debt"""
+
     # Verify contact belongs to current user
     contact = db.query(Contact).filter(
         Contact.id == debt_data.contact_id,
@@ -40,26 +24,29 @@ def create_debt(
     ).first()
 
     if not contact:
-        error_response("Contact not found or doesn't belong to you", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Contact not found")
 
     # Validate amount
     if debt_data.amount <= 0:
-        error_response("Amount must be greater than 0", status_code=status.HTTP_400_BAD_REQUEST)
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
 
     # Create debt
     debt = Debt(
         contact_id=debt_data.contact_id,
         amount=debt_data.amount,
         description=debt_data.description,
-        is_my_debt=debt_data.is_my_debt
+        is_my_debt=debt_data.is_my_debt,
+        is_paid=False
     )
+
     db.add(debt)
     db.commit()
     db.refresh(debt)
 
-    return success_response(
-        "Debt created successfully",
-        {
+    return {
+        "success": True,
+        "message": "Debt created successfully",
+        "data": {
             "id": debt.id,
             "contact_id": debt.contact_id,
             "contact_name": contact.name,
@@ -68,20 +55,20 @@ def create_debt(
             "is_paid": debt.is_paid,
             "is_my_debt": debt.is_my_debt,
             "created_at": debt.created_at.isoformat()
-        },
-        status_code=201
-    )
+        }
+    }
 
 
-@router.get("/")
+@router.get("/", response_model=dict)
 def get_debts(
         is_paid: Optional[bool] = Query(None, description="Filter by paid status"),
         is_my_debt: Optional[bool] = Query(None, description="Filter by debt type"),
         contact_id: Optional[int] = Query(None, description="Filter by contact"),
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Get all debts for user with optional filters"""
+
     # Base query - only debts for contacts owned by current user
     query = db.query(Debt).join(Contact).filter(Contact.user_id == current_user.id)
 
@@ -100,7 +87,7 @@ def get_debts(
         ).first()
 
         if not contact:
-            error_response("Contact not found", status_code=status.HTTP_404_NOT_FOUND)
+            raise HTTPException(status_code=404, detail="Contact not found")
 
         query = query.filter(Debt.contact_id == contact_id)
 
@@ -120,26 +107,28 @@ def get_debts(
             "created_at": debt.created_at.isoformat()
         })
 
-    return success_response(
-        f"Retrieved {len(debt_list)} debts",
-        {
+    return {
+        "success": True,
+        "message": f"Retrieved {len(debt_list)} debts",
+        "data": {
             "debts": debt_list,
             "total_count": len(debt_list),
-            "filters_applied": {
+            "filters": {
                 "is_paid": is_paid,
                 "is_my_debt": is_my_debt,
                 "contact_id": contact_id
             }
         }
-    )
+    }
 
 
-@router.get("/overview")
+@router.get("/overview", response_model=dict)
 def get_debt_overview(
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Get debt overview/summary for user"""
+
     # Get all debts for user's contacts
     debts = db.query(Debt).join(Contact).filter(Contact.user_id == current_user.id).all()
 
@@ -169,9 +158,10 @@ def get_debt_overview(
             "created_at": debt.created_at.isoformat()
         })
 
-    return success_response(
-        "Debt overview retrieved successfully",
-        {
+    return {
+        "success": True,
+        "message": "Debt overview retrieved successfully",
+        "data": {
             "summary": {
                 "i_owe": i_owe_total,
                 "they_owe_me": they_owe_total,
@@ -182,27 +172,29 @@ def get_debt_overview(
             },
             "recent_debts": recent_list
         }
-    )
+    }
 
 
-@router.get("/{debt_id}")
+@router.get("/{debt_id}", response_model=dict)
 def get_debt(
         debt_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Get specific debt by ID"""
+
     debt = db.query(Debt).join(Contact).filter(
         Debt.id == debt_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not debt:
-        error_response("Debt not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Debt not found")
 
-    return success_response(
-        "Debt retrieved successfully",
-        {
+    return {
+        "success": True,
+        "message": "Debt retrieved successfully",
+        "data": {
             "id": debt.id,
             "contact_id": debt.contact_id,
             "contact_name": debt.contact.name,
@@ -213,28 +205,29 @@ def get_debt(
             "is_my_debt": debt.is_my_debt,
             "created_at": debt.created_at.isoformat()
         }
-    )
+    }
 
 
-@router.put("/{debt_id}")
+@router.put("/{debt_id}", response_model=dict)
 def update_debt(
         debt_id: int,
         debt_data: DebtUpdate,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Update debt"""
+
     debt = db.query(Debt).join(Contact).filter(
         Debt.id == debt_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not debt:
-        error_response("Debt not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Debt not found")
 
     # Validate amount
     if debt_data.amount <= 0:
-        error_response("Amount must be greater than 0", status_code=status.HTTP_400_BAD_REQUEST)
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
 
     # Update debt
     debt.amount = debt_data.amount
@@ -245,9 +238,10 @@ def update_debt(
     db.commit()
     db.refresh(debt)
 
-    return success_response(
-        "Debt updated successfully",
-        {
+    return {
+        "success": True,
+        "message": "Debt updated successfully",
+        "data": {
             "id": debt.id,
             "contact_name": debt.contact.name,
             "amount": debt.amount,
@@ -256,23 +250,24 @@ def update_debt(
             "is_my_debt": debt.is_my_debt,
             "created_at": debt.created_at.isoformat()
         }
-    )
+    }
 
 
-@router.delete("/{debt_id}")
+@router.delete("/{debt_id}", response_model=dict)
 def delete_debt(
         debt_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Delete debt"""
+
     debt = db.query(Debt).join(Contact).filter(
         Debt.id == debt_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not debt:
-        error_response("Debt not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Debt not found")
 
     # Store debt info before deletion
     debt_info = {
@@ -286,36 +281,41 @@ def delete_debt(
     db.delete(debt)
     db.commit()
 
-    return success_response(
-        "Debt deleted successfully",
-        {"deleted_debt": debt_info}
-    )
+    return {
+        "success": True,
+        "message": "Debt deleted successfully",
+        "data": {
+            "deleted_debt": debt_info
+        }
+    }
 
 
-@router.patch("/{debt_id}/pay")
+@router.patch("/{debt_id}/pay", response_model=dict)
 def mark_debt_paid(
         debt_id: int,
-        db: Session = Depends(get_db),
-        current_user: User = Depends(get_current_user)
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
 ):
     """Mark debt as paid (quick action)"""
+
     debt = db.query(Debt).join(Contact).filter(
         Debt.id == debt_id,
         Contact.user_id == current_user.id
     ).first()
 
     if not debt:
-        error_response("Debt not found", status_code=status.HTTP_404_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Debt not found")
 
     debt.is_paid = True
     db.commit()
 
-    return success_response(
-        "Debt marked as paid",
-        {
+    return {
+        "success": True,
+        "message": "Debt marked as paid",
+        "data": {
             "id": debt.id,
             "contact_name": debt.contact.name,
             "amount": debt.amount,
             "is_paid": debt.is_paid
         }
-    )
+    }
