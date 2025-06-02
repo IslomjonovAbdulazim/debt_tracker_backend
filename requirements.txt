@@ -1,6 +1,6 @@
 # Core FastAPI dependencies
 fastapi==0.115.6
-uvicorn==0.34.2
+uvicorn[standard]==0.34.2
 python-multipart==0.0.19
 
 # Database
@@ -17,5 +17,14 @@ pydantic[email]==2.5.0
 # Environment variables
 python-dotenv==1.0.0
 
-# Async file operations for email queue
+# Email dependencies - optimized for 2025
+email-validator==2.1.0
+
+# Async file operations
 aiofiles==23.2.0
+
+# Additional utilities for production
+python-dateutil==2.8.2
+
+# Optional: For better logging in production
+structlog==23.2.0
