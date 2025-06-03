@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from database import get_db, User, VerificationCode
 from models import UserRegister, UserLogin, VerifyCode, ForgotPassword, ResetPassword
 from auth_utils import hash_password, verify_password, create_access_token, verify_token
-from email_service import (
+from resend_email_service import (
+    resend_service,
     generate_verification_code,
     send_verification_email,
     send_password_reset_email,
@@ -43,7 +44,7 @@ def get_current_user(token: str = Depends(security), db: Session = Depends(get_d
 
 @router.post("/register")
 def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    """Register a new user"""
+    """Register a new user with Resend email service"""
 
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == user_data.email).first()
@@ -80,8 +81,8 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
     db.add(verification)
     db.commit()
 
-    # Send verification email
-    email_sent = send_verification_email(user_data.email, user_data.fullname, code)
+    # Send verification email via Resend
+    email_result = resend_service.send_verification_email(user_data.email, user_data.fullname, code)
 
     return {
         "success": True,
@@ -89,7 +90,9 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
         "data": {
             "user_id": user.id,
             "email": user.email,
-            "email_sent": email_sent
+            "email_sent": email_result["success"],
+            "email_provider": email_result.get("provider", "Resend"),
+            "email_details": email_result
         }
     }
 
@@ -179,7 +182,7 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 @router.post("/forgot-password")
 def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
-    """Request password reset"""
+    """Request password reset with Resend email service"""
 
     # Find user
     user = db.query(User).filter(User.email == forgot_data.email).first()
@@ -204,15 +207,18 @@ def forgot_password(forgot_data: ForgotPassword, db: Session = Depends(get_db)):
     db.add(verification)
     db.commit()
 
-    # Send reset email
-    email_sent = send_password_reset_email(forgot_data.email, user.fullname, code)
+    # Send reset email via Resend
+    email_result = resend_service.send_password_reset_email(forgot_data.email, user.fullname, code)
 
     return {
         "success": True,
-        "message": "Password reset code sent to your email address" if email_sent else "Reset code generated, but email sending failed",
+        "message": "Password reset code sent successfully" if email_result[
+            "success"] else "Reset code generated, but email sending failed",
         "data": {
             "email": forgot_data.email,
-            "email_sent": email_sent
+            "email_sent": email_result["success"],
+            "email_provider": email_result.get("provider", "Resend"),
+            "email_details": email_result
         }
     }
 
@@ -253,7 +259,7 @@ def reset_password(reset_data: ResetPassword, db: Session = Depends(get_db)):
 
 @router.post("/resend-code")
 def resend_verification_code(email_data: ForgotPassword, db: Session = Depends(get_db)):
-    """Resend verification code"""
+    """Resend verification code via Resend email service"""
 
     # Find user
     user = db.query(User).filter(User.email == email_data.email).first()
@@ -281,29 +287,54 @@ def resend_verification_code(email_data: ForgotPassword, db: Session = Depends(g
     db.add(verification)
     db.commit()
 
-    # Send email
-    email_sent = send_verification_email(email_data.email, user.fullname, code)
+    # Send email via Resend
+    email_result = resend_service.send_verification_email(email_data.email, user.fullname, code)
 
     return {
         "success": True,
-        "message": "Verification code resent to your email address" if email_sent else "Code generated, but email sending failed",
+        "message": "Verification code resent successfully" if email_result[
+            "success"] else "Code generated, but email sending failed",
         "data": {
             "email": email_data.email,
-            "email_sent": email_sent
+            "email_sent": email_result["success"],
+            "email_provider": email_result.get("provider", "Resend"),
+            "email_details": email_result
         }
     }
 
 
 # ==================
-# TEST ENDPOINT
+# TEST ENDPOINTS
 # ==================
 
 @router.get("/smtp-test")
 def test_smtp():
-    """Test SMTP connection"""
-    result = test_smtp_connection()
+    """Test Resend email service configuration"""
+    result = resend_service.test_connection()
     return {
         "success": result["success"],
-        "message": result["message"],
+        "message": result.get("message", result.get("error", "Unknown error")),
         "data": result
+    }
+
+
+@router.get("/email-service-info")
+def get_email_service_info():
+    """Get Resend email service information"""
+    return {
+        "success": True,
+        "data": {
+            "provider": "Resend",
+            "from_email": resend_service.from_email,
+            "from_name": resend_service.from_name,
+            "api_configured": bool(resend_service.api_key),
+            "benefits": [
+                "3,000 emails/month free",
+                "No phone verification required",
+                "High deliverability rates",
+                "Simple API integration",
+                "Works on any server"
+            ],
+            "setup_url": "https://resend.com"
+        }
     }

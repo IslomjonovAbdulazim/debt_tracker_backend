@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from database import create_tables
 from routers import auth, contacts, debts
-from email_service import test_smtp_connection
+from resend_email_service import resend_service
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title=os.getenv("APP_NAME", "Simple Debt Tracker"),
-    description="A simple debt tracking API with secure email authentication",
+    description="A simple debt tracking API with Resend email authentication",
     version=os.getenv("APP_VERSION", "1.0.0"),
     docs_url="/docs" if os.getenv("DEBUG", "False").lower() == "true" else None,
     redoc_url="/redoc" if os.getenv("DEBUG", "False").lower() == "true" else None,
@@ -94,12 +94,13 @@ async def startup_event():
         create_tables()
         logger.info("✅ Database tables initialized")
 
-        # Test SMTP connection
-        smtp_test = test_smtp_connection()
-        if smtp_test["success"]:
-            logger.info("✅ SMTP connection test successful")
+        # Test Resend email service
+        email_test = resend_service.test_connection()
+        if email_test["success"]:
+            logger.info(f"✅ Resend email service ready: {email_test.get('provider', 'Resend')}")
         else:
-            logger.warning(f"⚠️ SMTP connection test failed: {smtp_test['message']}")
+            logger.warning(f"⚠️ Resend email service test failed: {email_test.get('error', 'unknown error')}")
+            logger.warning("Email functionality may not work properly")
 
         logger.info("🎉 Application startup completed successfully")
 
@@ -117,20 +118,29 @@ app.include_router(debts.router, prefix="/debts", tags=["Debts"])
 # Root endpoint
 @app.get("/")
 def read_root():
-    """Root endpoint"""
+    """Root endpoint with system information"""
     return {
         "message": "Simple Debt Tracker API is running!",
         "version": os.getenv("APP_VERSION", "1.0.0"),
         "environment": os.getenv("ENVIRONMENT", "development"),
+        "email_provider": "Resend",
         "documentation": "/docs" if os.getenv("DEBUG", "False").lower() == "true" else "disabled",
-        "status": "healthy"
+        "status": "healthy",
+        "endpoints": {
+            "health": "/health",
+            "authentication": "/auth/*",
+            "contacts": "/contacts/*",
+            "debts": "/debts/*",
+            "email_test": "/auth/smtp-test",
+            "email_info": "/auth/email-service-info"
+        }
     }
 
 
-# Health check
+# Enhanced health check
 @app.get("/health")
 def health_check():
-    """Health check"""
+    """Comprehensive health check including email service"""
     try:
         # Test database connection
         from database import SessionLocal
@@ -142,22 +152,52 @@ def health_check():
         logger.error(f"Database health check failed: {e}")
         db_status = "unhealthy"
 
-    # Test SMTP configuration
-    smtp_test = test_smtp_connection()
-    smtp_status = "healthy" if smtp_test["success"] else "degraded"
+    # Test Resend email service
+    email_test = resend_service.test_connection()
+    email_status = "healthy" if email_test["success"] else "degraded"
 
     overall_status = "healthy"
     if db_status == "unhealthy":
         overall_status = "unhealthy"
-    elif smtp_status == "degraded":
+    elif email_status == "degraded":
         overall_status = "degraded"
 
     return {
         "status": overall_status,
+        "timestamp": "2025-06-03T00:00:00Z",
         "version": os.getenv("APP_VERSION", "1.0.0"),
         "services": {
             "database": db_status,
-            "email": smtp_status
+            "email": email_status
+        },
+        "email_provider": "Resend",
+        "message": "All services operational" if overall_status == "healthy" else "Some services may be degraded"
+    }
+
+
+# System information endpoint
+@app.get("/system-info")
+def system_info():
+    """System information for debugging"""
+    if os.getenv("DEBUG", "False").lower() != "true":
+        return {"message": "System info only available in debug mode"}
+
+    email_test = resend_service.test_connection()
+
+    return {
+        "environment": {
+            "app_name": os.getenv("APP_NAME", "Simple Debt Tracker"),
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "debug": os.getenv("DEBUG", "False"),
+            "log_level": os.getenv("LOG_LEVEL", "INFO")
+        },
+        "email_service": {
+            "provider": "Resend",
+            "from_email": resend_service.from_email,
+            "from_name": resend_service.from_name,
+            "api_key_configured": bool(resend_service.api_key),
+            "status": email_test["success"],
+            "message": email_test.get("message", email_test.get("error", "Unknown"))
         }
     }
 
@@ -165,6 +205,7 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
 
+    # Production-ready server configuration
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     workers = int(os.getenv("WORKERS", "1"))
